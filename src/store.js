@@ -39,15 +39,16 @@ function normalizeCommandName(name) {
 }
 
 function isValidCommandName(name) {
-  return /^[a-z0-9_-]{2,32}$/.test(name);
+  return /^[a-z0-9_-]{2,32}$/i.test(name);
 }
 
-function upsertCommand(name, content, authorId) {
+function upsertCommand(name, content, authorId, attachmentUrls = []) {
   const store = readStore();
   const key = normalizeCommandName(name);
 
   store.commands[key] = {
     content,
+    attachments: attachmentUrls || [],
     authorId,
     updatedAt: new Date().toISOString()
   };

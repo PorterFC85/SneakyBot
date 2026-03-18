@@ -1,65 +1,55 @@
-require("dotenv").config();
-const { REST, Routes, SlashCommandBuilder } = require("discord.js");
+require("dotenv").config({ quiet: true });
+const { Client, Intents } = require("discord.js");
+const { listCommands } = require("./store");
+const { buildGuildCommands } = require("./command-definitions");
 
 const token = process.env.DISCORD_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
-const guildId = process.env.DISCORD_GUILD_ID;
+const guildIdsRaw = process.env.DISCORD_GUILD_IDS || process.env.DISCORD_GUILD_ID || "";
+const guildIds = guildIdsRaw
+  .split(",")
+  .map((id) => id.trim())
+  .filter(Boolean);
 
-if (!token || !clientId || !guildId) {
-  console.error("Missing DISCORD_TOKEN, DISCORD_CLIENT_ID, or DISCORD_GUILD_ID in .env");
+if (!token || !clientId || guildIds.length === 0) {
+  console.error("Missing DISCORD_TOKEN, DISCORD_CLIENT_ID, or DISCORD_GUILD_ID(S) in .env");
   process.exit(1);
 }
 
-const commands = [
-  new SlashCommandBuilder()
-    .setName("setpost")
-    .setDescription("Create or update a stored post tied to a command name")
-    .addStringOption((option) =>
-      option
-        .setName("command")
-        .setDescription("Command name, like raid-rules")
-        .setRequired(true)
-    )
-    .addStringOption((option) =>
-      option
-        .setName("information")
-        .setDescription("The text to store")
-        .setRequired(true)
-    ),
-  new SlashCommandBuilder()
-    .setName("post")
-    .setDescription("Get information saved under a command name")
-    .addStringOption((option) =>
-      option
-        .setName("command")
-        .setDescription("Command name to look up")
-        .setRequired(true)
-    ),
-  new SlashCommandBuilder()
-    .setName("deletepost")
-    .setDescription("Delete a stored post")
-    .addStringOption((option) =>
-      option
-        .setName("command")
-        .setDescription("Command name to delete")
-        .setRequired(true)
-    ),
-  new SlashCommandBuilder()
-    .setName("listposts")
-    .setDescription("Show all available command names")
-].map((command) => command.toJSON());
+const commands = buildGuildCommands(listCommands());
 
-const rest = new REST({ version: "10" }).setToken(token);
+const client = new Client({ intents: [Intents.FLAGS.GUILDS] });
 
-(async () => {
+client.once("ready", async () => {
+  let failedGuilds = 0;
+
   try {
-    console.log(`Refreshing ${commands.length} guild slash commands...`);
-    await rest.put(Routes.applicationGuildCommands(clientId, guildId), {
-      body: commands
-    });
-    console.log("Guild slash commands registered.");
+    console.log(`Refreshing ${commands.length} commands for ${guildIds.length} server(s)...`);
+    for (const guildId of guildIds) {
+      try {
+        const guild = await client.guilds.fetch(guildId);
+        await guild.commands.set(commands);
+        console.log(`Registered commands in guild ${guildId}`);
+      } catch (guildError) {
+        failedGuilds += 1;
+        console.error(`Failed to register commands in guild ${guildId}:`, guildError.message);
+      }
+    }
+    if (failedGuilds > 0) {
+      console.log(`Completed with ${failedGuilds} guild failure(s).`);
+      process.exitCode = 1;
+    } else {
+      console.log("Guild slash commands registered.");
+    }
   } catch (error) {
     console.error(error);
-    process.exit(1);
+    process.exitCode = 1;
+  } finally {
+    client.destroy();
   }
-})();
+});
+
+client.login(token).catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
