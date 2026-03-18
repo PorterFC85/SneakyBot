@@ -55,7 +55,8 @@ function ensureGuildCutState(store, guildId) {
   if (!store.cutPolls[guildId] || typeof store.cutPolls[guildId] !== "object") {
     store.cutPolls[guildId] = {
       queuedNominations: [],
-      activePoll: null
+      activePoll: null,
+      lastResult: null
     };
     return;
   }
@@ -66,6 +67,10 @@ function ensureGuildCutState(store, guildId) {
 
   if (typeof store.cutPolls[guildId].activePoll === "undefined") {
     store.cutPolls[guildId].activePoll = null;
+  }
+
+  if (typeof store.cutPolls[guildId].lastResult === "undefined") {
+    store.cutPolls[guildId].lastResult = null;
   }
 }
 
@@ -243,6 +248,19 @@ function listActiveCutPolls() {
     .filter((item) => item.activePoll);
 }
 
+function setLastCutPollResult(guildId, lastResult) {
+  const store = readStore();
+  ensureGuildCutState(store, guildId);
+  store.cutPolls[guildId].lastResult = lastResult;
+  writeStore(store);
+}
+
+function getLastCutPollResult(guildId) {
+  const store = readStore();
+  ensureGuildCutState(store, guildId);
+  return store.cutPolls[guildId].lastResult || null;
+}
+
 module.exports = {
   isValidCommandName,
   upsertCommand,
@@ -259,5 +277,7 @@ module.exports = {
   clearActiveCutPoll,
   recordCutVote,
   listActiveCutPolls,
+  setLastCutPollResult,
+  getLastCutPollResult,
   normalizePersonName
 };

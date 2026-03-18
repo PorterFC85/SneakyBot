@@ -22,6 +22,8 @@ const {
   clearActiveCutPoll,
   recordCutVote,
   listActiveCutPolls,
+  setLastCutPollResult,
+  getLastCutPollResult,
   normalizePersonName
 } = require("./store");
 const { RESERVED_COMMANDS, buildGuildCommands } = require("./command-definitions");
@@ -260,23 +262,24 @@ async function postCutPollResults(guildId, activePoll, tally, endReason, endedBy
     : "Cut poll ended manually.";
 
   const voteLines = tally.ranked.map((item) => `- ${item.entry.name}: ${item.count} vote(s)`);
+  const resultContent = [
+    header,
+    `Total voters: ${tally.totalVoters}`,
+    `Total votes cast: ${tally.totalVotes}`,
+    "Results:",
+    ...voteLines
+  ].join("\n");
 
   try {
     await channel.send({
-      content: [
-        header,
-        `Total voters: ${tally.totalVoters}`,
-        `Total votes cast: ${tally.totalVotes}`,
-        "Results:",
-        ...voteLines
-      ].join("\n")
+      content: resultContent
     });
-    return { ok: true };
+    return { ok: true, content: resultContent };
   } catch (error) {
     // Missing access can happen if channel permissions changed before poll close.
     const message = error && error.message ? error.message : "Unknown error";
     console.warn(`Failed to post cut poll results in guild ${guildId}: ${message}`);
-    return { ok: false, reason: "post-failed" };
+    return { ok: false, reason: "post-failed", content: resultContent };
   }
 }
 
@@ -294,6 +297,16 @@ async function finalizeCutPoll(guildId, endReason, endedByUserId = null) {
   try {
     await disableCutPollButtons(activePoll);
     const postResult = await postCutPollResults(guildId, activePoll, tally, endReason, endedByUserId);
+    setLastCutPollResult(guildId, {
+      endedAt: new Date().toISOString(),
+      content: postResult.content,
+      totalVoters: tally.totalVoters,
+      totalVotes: tally.totalVotes,
+      entries: tally.ranked.map((item) => ({
+        name: item.entry.name,
+        votes: item.count
+      }))
+    });
     return { ok: true, tally, postResult };
   } catch (error) {
     const message = error && error.message ? error.message : "Unknown error";
@@ -789,6 +802,29 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
 
+  if (commandName === "cuts") {
+    const lastResult = getLastCutPollResult(interaction.guildId);
+
+    if (!lastResult || !lastResult.content) {
+      await interaction.reply({
+        content: "There are no completed cut poll results to repost yet.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    const endedAtMs = lastResult.endedAt ? new Date(lastResult.endedAt).getTime() : NaN;
+    const endedAtPrefix = Number.isFinite(endedAtMs)
+      ? `Last cut poll result from <t:${Math.floor(endedAtMs / 1000)}:R>.\n`
+      : "Last cut poll result.\n";
+
+    await interaction.reply({
+      content: `${endedAtPrefix}${lastResult.content}`,
+      ephemeral: false
+    });
+    return;
+  }
+
   if (commandName === "sneakybot") {
     const subcommand = interaction.options.getSubcommand();
 
@@ -812,6 +848,7 @@ client.on("interactionCreate", async (interaction) => {
         "- /cut why person:<name> -> show that person's stored reason (ephemeral)",
         "- /cut vote -> start a 5 minute button poll using queued nominations",
         "- /cut end -> end the active cut poll and post results",
+        "- /cuts -> repost the last completed cut poll results",
         "- !set <name> <info> -> save/update from message command",
         "- !<name> -> show the saved post from message command"
       ].join("\n"),

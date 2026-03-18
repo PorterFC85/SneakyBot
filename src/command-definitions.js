@@ -108,6 +108,10 @@ const BASE_COMMANDS = [
         required: false
       }
     ]
+  },
+  {
+    name: "cuts",
+    description: "Repost the last completed cut poll results"
   }
 ];
 
