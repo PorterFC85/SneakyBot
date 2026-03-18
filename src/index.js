@@ -4,6 +4,7 @@ const {
   Intents,
   Permissions,
   MessageActionRow,
+  MessageButton,
   Modal,
   TextInputComponent
 } = require("discord.js");
@@ -12,9 +13,21 @@ const {
   upsertCommand,
   getCommand,
   deleteCommand,
-  listCommands
+  listCommands,
+  upsertCutNomination,
+  getQueuedCutNominations,
+  findCutReason,
+  startCutPoll,
+  getActiveCutPoll,
+  clearActiveCutPoll,
+  recordCutVote,
+  listActiveCutPolls,
+  normalizePersonName
 } = require("./store");
 const { RESERVED_COMMANDS, buildGuildCommands } = require("./command-definitions");
+
+const CUT_POLL_DURATION_MS = 5 * 60 * 1000;
+const CUT_VOTE_CUSTOM_ID_PREFIX = "cutvote:";
 
 const token = process.env.DISCORD_TOKEN;
 const guildIdsRaw = process.env.DISCORD_GUILD_IDS || process.env.DISCORD_GUILD_ID || "";
@@ -101,6 +114,224 @@ async function syncConfiguredGuilds() {
   return { failedGuilds };
 }
 
+const cutPollTimeouts = new Map();
+
+function clearCutPollTimeout(guildId) {
+  const timer = cutPollTimeouts.get(guildId);
+  if (timer) {
+    clearTimeout(timer);
+    cutPollTimeouts.delete(guildId);
+  }
+}
+
+function buildCutVoteCustomId(normalizedName) {
+  return `${CUT_VOTE_CUSTOM_ID_PREFIX}${encodeURIComponent(normalizedName)}`;
+}
+
+function parseCutVoteCustomId(customId) {
+  if (!customId.startsWith(CUT_VOTE_CUSTOM_ID_PREFIX)) {
+    return null;
+  }
+
+  const encoded = customId.slice(CUT_VOTE_CUSTOM_ID_PREFIX.length);
+  if (!encoded) {
+    return null;
+  }
+
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return null;
+  }
+}
+
+function buildCutVoteRows(entries) {
+  const rows = [];
+  let currentRow = new MessageActionRow();
+
+  entries.forEach((entry, index) => {
+    if (index > 0 && index % 5 === 0) {
+      rows.push(currentRow);
+      currentRow = new MessageActionRow();
+    }
+
+    const label = entry.name.length > 80 ? `${entry.name.slice(0, 77)}...` : entry.name;
+
+    currentRow.addComponents(
+      new MessageButton()
+        .setCustomId(buildCutVoteCustomId(entry.normalizedName))
+        .setLabel(label)
+        .setStyle("PRIMARY")
+    );
+  });
+
+  if (currentRow.components.length > 0) {
+    rows.push(currentRow);
+  }
+
+  return rows;
+}
+
+function tallyCutPollVotes(activePoll) {
+  const voteTotals = {};
+  const entries = Array.isArray(activePoll.entries) ? activePoll.entries : [];
+
+  entries.forEach((entry) => {
+    voteTotals[entry.normalizedName] = 0;
+  });
+
+  const votes = activePoll.votes || {};
+  Object.values(votes).forEach((choice) => {
+    if (Object.prototype.hasOwnProperty.call(voteTotals, choice)) {
+      voteTotals[choice] += 1;
+    }
+  });
+
+  const ranked = entries
+    .map((entry) => ({
+      entry,
+      count: voteTotals[entry.normalizedName] || 0
+    }))
+    .sort((a, b) => {
+      if (b.count !== a.count) {
+        return b.count - a.count;
+      }
+
+      return a.entry.name.localeCompare(b.entry.name);
+    });
+
+  const maxVotes = ranked.length > 0 ? ranked[0].count : 0;
+  const winners = maxVotes > 0 ? ranked.filter((item) => item.count === maxVotes) : [];
+
+  return {
+    ranked,
+    winners,
+    totalVoters: Object.keys(votes).length
+  };
+}
+
+async function disableCutPollButtons(activePoll) {
+  if (!activePoll || !activePoll.channelId || !activePoll.messageId) {
+    return;
+  }
+
+  try {
+    const channel = await client.channels.fetch(activePoll.channelId);
+    if (!channel || !channel.isText()) {
+      return;
+    }
+
+    const pollMessage = await channel.messages.fetch(activePoll.messageId);
+    if (!pollMessage || !pollMessage.components || pollMessage.components.length === 0) {
+      return;
+    }
+
+    const disabledRows = pollMessage.components.map((row) => {
+      const nextRow = new MessageActionRow();
+      row.components.forEach((component) => {
+        nextRow.addComponents(MessageButton.from(component).setDisabled(true));
+      });
+      return nextRow;
+    });
+
+    await pollMessage.edit({ components: disabledRows });
+  } catch {
+    // Ignore cleanup failures if the message/channel is gone.
+  }
+}
+
+async function postCutPollResults(guildId, activePoll, tally, endReason, endedByUserId) {
+  let channel = null;
+
+  try {
+    channel = await client.channels.fetch(activePoll.channelId);
+  } catch {
+    channel = null;
+  }
+
+  if (!channel || !channel.isText()) {
+    return;
+  }
+
+  const header = endReason === "timeout"
+    ? "Cut poll ended automatically after 5 minutes."
+    : `Cut poll ended by <@${endedByUserId}>.`;
+
+  const voteLines = tally.ranked.map((item) => `- ${item.entry.name}: ${item.count} vote(s)`);
+
+  let winnerLine = "No votes were cast.";
+  if (tally.winners.length === 1) {
+    winnerLine = `Winner: ${tally.winners[0].entry.name}`;
+  } else if (tally.winners.length > 1) {
+    winnerLine = `Tie: ${tally.winners.map((item) => item.entry.name).join(", ")}`;
+  }
+
+  await channel.send({
+    content: [
+      header,
+      `Total voters: ${tally.totalVoters}`,
+      "Results:",
+      ...voteLines,
+      winnerLine
+    ].join("\n")
+  });
+}
+
+async function finalizeCutPoll(guildId, endReason, endedByUserId = null) {
+  const activePoll = getActiveCutPoll(guildId);
+  if (!activePoll) {
+    return { ok: false, reason: "no-active-poll" };
+  }
+
+  clearCutPollTimeout(guildId);
+  const tally = tallyCutPollVotes(activePoll);
+
+  clearActiveCutPoll(guildId);
+  await disableCutPollButtons(activePoll);
+  await postCutPollResults(guildId, activePoll, tally, endReason, endedByUserId);
+
+  return { ok: true, tally };
+}
+
+function scheduleCutPollTimeout(guildId, expiresAt) {
+  clearCutPollTimeout(guildId);
+  const expiryMs = new Date(expiresAt).getTime();
+
+  if (!Number.isFinite(expiryMs)) {
+    return;
+  }
+
+  const delay = expiryMs - Date.now();
+  if (delay <= 0) {
+    void finalizeCutPoll(guildId, "timeout");
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    void finalizeCutPoll(guildId, "timeout");
+  }, delay);
+
+  cutPollTimeouts.set(guildId, timer);
+}
+
+function buildCutPollMessage(entries) {
+  return [
+    "Cut poll started. Vote by pressing one button below.",
+    "The poll ends in 5 minutes or when /cut end is used.",
+    "Nominees:",
+    ...entries.map((entry, index) => `${index + 1}. ${entry.name}`)
+  ].join("\n");
+}
+
+function restoreActiveCutPollTimeouts() {
+  const activePolls = listActiveCutPolls();
+  activePolls.forEach((pollInfo) => {
+    scheduleCutPollTimeout(pollInfo.guildId, pollInfo.activePoll.expiresAt);
+  });
+
+  return activePolls.length;
+}
+
 client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
@@ -113,12 +344,79 @@ client.once("ready", async () => {
     } else {
       console.log(`Slash commands synchronized for ${configuredGuildIds.length} server(s).`);
     }
+
+    const restoredPolls = restoreActiveCutPollTimeouts();
+    if (restoredPolls > 0) {
+      console.log(`Recovered ${restoredPolls} active cut poll timeout(s).`);
+    }
   } catch (error) {
     console.error("Failed to synchronize slash commands:", error);
   }
 });
 
 client.on("interactionCreate", async (interaction) => {
+  if (interaction.isButton() && interaction.customId.startsWith(CUT_VOTE_CUSTOM_ID_PREFIX)) {
+    if (!canUseBot(interaction)) {
+      await interaction.reply({
+        content: "You are not allowed to use this bot.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    const guildId = interaction.guildId;
+    const activePoll = getActiveCutPoll(guildId);
+    if (!activePoll) {
+      await interaction.reply({
+        content: "There is no active cut poll right now.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (activePoll.messageId !== interaction.message.id) {
+      await interaction.reply({
+        content: "This vote button is no longer active.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (Date.now() >= new Date(activePoll.expiresAt).getTime()) {
+      await finalizeCutPoll(guildId, "timeout");
+      await interaction.reply({
+        content: "This poll already timed out.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    const selectedName = parseCutVoteCustomId(interaction.customId);
+    if (!selectedName) {
+      await interaction.reply({
+        content: "Invalid vote option.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    const voteResult = recordCutVote(guildId, interaction.user.id, selectedName);
+    if (!voteResult.ok) {
+      await interaction.reply({
+        content: "Unable to record your vote for that option.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    const selectedEntry = activePoll.entries.find((entry) => entry.normalizedName === selectedName);
+    await interaction.reply({
+      content: `Vote recorded for ${selectedEntry ? selectedEntry.name : "that option"}.`,
+      ephemeral: true
+    });
+    return;
+  }
+
   if (interaction.isModalSubmit() && interaction.customId.startsWith("setpost:")) {
     if (!canUseBot(interaction)) {
       await interaction.reply({
@@ -344,6 +642,142 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
 
+  if (commandName === "cut") {
+    const subcommand = interaction.options.getSubcommand();
+    const guildId = interaction.guildId;
+
+    if (subcommand === "nominate") {
+      const activePoll = getActiveCutPoll(guildId);
+      if (activePoll) {
+        await interaction.reply({
+          content: "A cut poll is already active. Wait for it to end before adding nominations.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      const person = interaction.options.getString("person", true).trim();
+      const reason = interaction.options.getString("reason", true).trim();
+
+      if (!person || !reason) {
+        await interaction.reply({
+          content: "Both person and reason are required.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      if (person.length > 80) {
+        await interaction.reply({
+          content: "Person name must be 80 characters or fewer.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      upsertCutNomination(guildId, person, reason, interaction.user.id);
+      const queueSize = getQueuedCutNominations(guildId).length;
+      await interaction.reply({
+        content: `Nomination saved for ${person}. Current queue size: ${queueSize}.`,
+        ephemeral: false
+      });
+      return;
+    }
+
+    if (subcommand === "why") {
+      const person = interaction.options.getString("person", true);
+      const nomination = findCutReason(guildId, person);
+
+      if (!nomination) {
+        await interaction.reply({
+          content: "No nomination found for that person.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      await interaction.reply({
+        content: `Reason for ${nomination.name}: ${nomination.reason}`,
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (subcommand === "vote") {
+      const existingPoll = getActiveCutPoll(guildId);
+      if (existingPoll) {
+        await interaction.reply({
+          content: "A cut poll is already active in this server.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      const queuedNominations = getQueuedCutNominations(guildId);
+      if (queuedNominations.length === 0) {
+        await interaction.reply({
+          content: "No nominations queued. Use /cut nominate first.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      if (queuedNominations.length > 25) {
+        await interaction.reply({
+          content: "Too many nominations. Keep it to 25 or fewer.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      const entries = queuedNominations.map((entry) => ({
+        name: entry.name,
+        normalizedName: normalizePersonName(entry.name),
+        reason: entry.reason,
+        nominatedBy: entry.nominatedBy,
+        createdAt: entry.createdAt
+      }));
+
+      const expiresAt = new Date(Date.now() + CUT_POLL_DURATION_MS).toISOString();
+      const voteRows = buildCutVoteRows(entries);
+
+      await interaction.reply({
+        content: buildCutPollMessage(entries),
+        components: voteRows
+      });
+
+      const pollMessage = await interaction.fetchReply();
+      startCutPoll(guildId, {
+        messageId: pollMessage.id,
+        channelId: pollMessage.channelId,
+        startedBy: interaction.user.id,
+        startedAt: new Date().toISOString(),
+        expiresAt,
+        entries,
+        votes: {}
+      });
+      scheduleCutPollTimeout(guildId, expiresAt);
+      return;
+    }
+
+    if (subcommand === "end") {
+      const result = await finalizeCutPoll(guildId, "manual", interaction.user.id);
+      await interaction.reply({
+        content: result.ok
+          ? "Cut poll ended. Results have been posted."
+          : "There is no active cut poll to end.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    await interaction.reply({
+      content: "Use /cut nominate, /cut why, /cut vote, or /cut end.",
+      ephemeral: true
+    });
+    return;
+  }
+
   if (commandName === "sneakybot") {
     const subcommand = interaction.options.getSubcommand();
 
@@ -363,6 +797,10 @@ client.on("interactionCreate", async (interaction) => {
         "- /post command:<name> -> fallback lookup by command name",
         "- /list post -> list all saved post command names",
         "- /deletepost command:<name> -> delete a saved post",
+        "- /cut nominate person:<name> reason:<text> -> queue a person for the next cut poll",
+        "- /cut why person:<name> -> show that person's stored reason (ephemeral)",
+        "- /cut vote -> start a 5 minute button poll using queued nominations",
+        "- /cut end -> end the active cut poll and post results",
         "- !set <name> <info> -> save/update from message command",
         "- !<name> -> show the saved post from message command"
       ].join("\n"),
