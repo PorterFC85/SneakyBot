@@ -181,10 +181,13 @@ function tallyCutPollVotes(activePoll) {
   });
 
   const votes = activePoll.votes || {};
-  Object.values(votes).forEach((choice) => {
-    if (Object.prototype.hasOwnProperty.call(voteTotals, choice)) {
-      voteTotals[choice] += 1;
-    }
+  Object.values(votes).forEach((choices) => {
+    const selectedChoices = Array.isArray(choices) ? choices : [choices];
+    selectedChoices.forEach((choice) => {
+      if (Object.prototype.hasOwnProperty.call(voteTotals, choice)) {
+        voteTotals[choice] += 1;
+      }
+    });
   });
 
   const ranked = entries
@@ -200,13 +203,12 @@ function tallyCutPollVotes(activePoll) {
       return a.entry.name.localeCompare(b.entry.name);
     });
 
-  const maxVotes = ranked.length > 0 ? ranked[0].count : 0;
-  const winners = maxVotes > 0 ? ranked.filter((item) => item.count === maxVotes) : [];
+  const totalVotes = ranked.reduce((sum, item) => sum + item.count, 0);
 
   return {
     ranked,
-    winners,
-    totalVoters: Object.keys(votes).length
+    totalVoters: Object.keys(votes).length,
+    totalVotes
   };
 }
 
@@ -259,20 +261,13 @@ async function postCutPollResults(guildId, activePoll, tally, endReason, endedBy
 
   const voteLines = tally.ranked.map((item) => `- ${item.entry.name}: ${item.count} vote(s)`);
 
-  let winnerLine = "No votes were cast.";
-  if (tally.winners.length === 1) {
-    winnerLine = `Winner: ${tally.winners[0].entry.name}`;
-  } else if (tally.winners.length > 1) {
-    winnerLine = `Tie: ${tally.winners.map((item) => item.entry.name).join(", ")}`;
-  }
-
   await channel.send({
     content: [
       header,
       `Total voters: ${tally.totalVoters}`,
+      `Total votes cast: ${tally.totalVotes}`,
       "Results:",
-      ...voteLines,
-      winnerLine
+      ...voteLines
     ].join("\n")
   });
 }
@@ -403,7 +398,9 @@ client.on("interactionCreate", async (interaction) => {
     const voteResult = recordCutVote(guildId, interaction.user.id, selectedName);
     if (!voteResult.ok) {
       await interaction.reply({
-        content: "Unable to record your vote for that option.",
+        content: voteResult.reason === "duplicate-vote"
+          ? "You already voted for that person. Pick another name if you want to cast more votes."
+          : "Unable to record your vote for that option.",
         ephemeral: true
       });
       return;
@@ -411,7 +408,7 @@ client.on("interactionCreate", async (interaction) => {
 
     const selectedEntry = activePoll.entries.find((entry) => entry.normalizedName === selectedName);
     await interaction.reply({
-      content: `Vote recorded for ${selectedEntry ? selectedEntry.name : "that option"}.`,
+      content: `Vote recorded for ${selectedEntry ? selectedEntry.name : "that option"}. You can vote for more than one person.`,
       ephemeral: true
     });
     return;

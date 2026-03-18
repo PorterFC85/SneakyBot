@@ -219,7 +219,15 @@ function recordCutVote(guildId, userId, normalizedName) {
     activePoll.votes = {};
   }
 
-  activePoll.votes[userId] = normalizedName;
+  const existingVotes = Array.isArray(activePoll.votes[userId])
+    ? activePoll.votes[userId]
+    : [];
+
+  if (existingVotes.includes(normalizedName)) {
+    return { ok: false, reason: "duplicate-vote" };
+  }
+
+  activePoll.votes[userId] = [...existingVotes, normalizedName];
   store.cutPolls[guildId].activePoll = activePoll;
   writeStore(store);
 
