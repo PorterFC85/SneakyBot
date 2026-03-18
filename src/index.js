@@ -261,15 +261,23 @@ async function postCutPollResults(guildId, activePoll, tally, endReason, endedBy
 
   const voteLines = tally.ranked.map((item) => `- ${item.entry.name}: ${item.count} vote(s)`);
 
-  await channel.send({
-    content: [
-      header,
-      `Total voters: ${tally.totalVoters}`,
-      `Total votes cast: ${tally.totalVotes}`,
-      "Results:",
-      ...voteLines
-    ].join("\n")
-  });
+  try {
+    await channel.send({
+      content: [
+        header,
+        `Total voters: ${tally.totalVoters}`,
+        `Total votes cast: ${tally.totalVotes}`,
+        "Results:",
+        ...voteLines
+      ].join("\n")
+    });
+    return { ok: true };
+  } catch (error) {
+    // Missing access can happen if channel permissions changed before poll close.
+    const message = error && error.message ? error.message : "Unknown error";
+    console.warn(`Failed to post cut poll results in guild ${guildId}: ${message}`);
+    return { ok: false, reason: "post-failed" };
+  }
 }
 
 async function finalizeCutPoll(guildId, endReason, endedByUserId = null) {
@@ -282,10 +290,16 @@ async function finalizeCutPoll(guildId, endReason, endedByUserId = null) {
   const tally = tallyCutPollVotes(activePoll);
 
   clearActiveCutPoll(guildId);
-  await disableCutPollButtons(activePoll);
-  await postCutPollResults(guildId, activePoll, tally, endReason, endedByUserId);
 
-  return { ok: true, tally };
+  try {
+    await disableCutPollButtons(activePoll);
+    const postResult = await postCutPollResults(guildId, activePoll, tally, endReason, endedByUserId);
+    return { ok: true, tally, postResult };
+  } catch (error) {
+    const message = error && error.message ? error.message : "Unknown error";
+    console.warn(`Cut poll finalized with partial failures in guild ${guildId}: ${message}`);
+    return { ok: true, tally, postResult: { ok: false, reason: "finalize-failed" } };
+  }
 }
 
 function scheduleCutPollTimeout(guildId, expiresAt) {
