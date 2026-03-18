@@ -257,7 +257,7 @@ async function postCutPollResults(guildId, activePoll, tally, endReason, endedBy
 
   const header = endReason === "timeout"
     ? "Cut poll ended automatically after 5 minutes."
-    : `Cut poll ended by <@${endedByUserId}>.`;
+    : "Cut poll ended manually.";
 
   const voteLines = tally.ranked.map((item) => `- ${item.entry.name}: ${item.count} vote(s)`);
 
