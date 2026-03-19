@@ -38,6 +38,7 @@ Only users with **Manage Server** permission can use `/setpost` and `/deletepost
   - or `DISCORD_GUILD_IDS` (comma-separated server IDs for multi-server use)
   - optional `ALLOWED_USER_IDS` (comma-separated user IDs)
   - optional `ALLOWED_ROLE_IDS` (comma-separated role IDs)
+  - optional `CUT_POLL_CHANNEL_ID` (channel ID where `/cut` and `/cuts` are allowed)
 
 If `ALLOWED_USER_IDS` and/or `ALLOWED_ROLE_IDS` are set, only those users/roles (plus Manage Server admins) can use the bot.
 

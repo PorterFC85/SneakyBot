@@ -30,6 +30,7 @@ const { RESERVED_COMMANDS, buildGuildCommands } = require("./command-definitions
 
 const CUT_POLL_DURATION_MS = 5 * 60 * 1000;
 const CUT_VOTE_CUSTOM_ID_PREFIX = "cutvote:";
+const cutPollChannelId = (process.env.CUT_POLL_CHANNEL_ID || "").trim();
 
 const token = process.env.DISCORD_TOKEN;
 const guildIdsRaw = process.env.DISCORD_GUILD_IDS || process.env.DISCORD_GUILD_ID || "";
@@ -93,6 +94,22 @@ function canUseBot(interaction) {
   }
 
   return hasAllowedRole(interaction);
+}
+
+function isCutPollChannel(channelId) {
+  if (!cutPollChannelId) {
+    return true;
+  }
+
+  return channelId === cutPollChannelId;
+}
+
+function getCutPollChannelWarning() {
+  if (!cutPollChannelId) {
+    return "Cut poll channel is not configured. Ask an admin to set CUT_POLL_CHANNEL_ID in .env.";
+  }
+
+  return `Cut poll commands can only be used in <#${cutPollChannelId}>.`;
 }
 
 async function syncGuildCommands(guild) {
@@ -387,6 +404,14 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     const guildId = interaction.guildId;
+    if (!isCutPollChannel(interaction.channelId)) {
+      await interaction.reply({
+        content: getCutPollChannelWarning(),
+        ephemeral: true
+      });
+      return;
+    }
+
     const activePoll = getActiveCutPoll(guildId);
     if (!activePoll) {
       await interaction.reply({
@@ -670,6 +695,14 @@ client.on("interactionCreate", async (interaction) => {
     const subcommand = interaction.options.getSubcommand();
     const guildId = interaction.guildId;
 
+    if (!isCutPollChannel(interaction.channelId)) {
+      await interaction.reply({
+        content: getCutPollChannelWarning(),
+        ephemeral: true
+      });
+      return;
+    }
+
     if (subcommand === "nominate") {
       const activePoll = getActiveCutPoll(guildId);
       if (activePoll) {
@@ -803,6 +836,14 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   if (commandName === "cuts") {
+    if (!isCutPollChannel(interaction.channelId)) {
+      await interaction.reply({
+        content: getCutPollChannelWarning(),
+        ephemeral: true
+      });
+      return;
+    }
+
     const lastResult = getLastCutPollResult(interaction.guildId);
 
     if (!lastResult || !lastResult.content) {
