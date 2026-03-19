@@ -1,12 +1,14 @@
 require("dotenv").config({ quiet: true });
 const {
   Client,
-  Intents,
-  Permissions,
-  MessageActionRow,
-  MessageButton,
-  Modal,
-  TextInputComponent
+  GatewayIntentBits,
+  PermissionsBitField,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle
 } = require("discord.js");
 const {
   isValidCommandName,
@@ -57,14 +59,14 @@ if (configuredGuildIds.length === 0) {
 }
 
 const client = new Client({
-  intents: [Intents.FLAGS.GUILDS, Intents.FLAGS.GUILD_MESSAGES, Intents.FLAGS.MESSAGE_CONTENT]
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
 function hasManageGuildPermission(interaction) {
   if (!interaction.memberPermissions) {
     return false;
   }
-  return interaction.memberPermissions.has(Permissions.FLAGS.MANAGE_GUILD);
+  return interaction.memberPermissions.has(PermissionsBitField.Flags.ManageGuild);
 }
 
 function hasAllowedRole(interaction) {
@@ -166,21 +168,21 @@ function parseCutVoteCustomId(customId) {
 
 function buildCutVoteRows(entries) {
   const rows = [];
-  let currentRow = new MessageActionRow();
+  let currentRow = new ActionRowBuilder();
 
   entries.forEach((entry, index) => {
     if (index > 0 && index % 5 === 0) {
       rows.push(currentRow);
-      currentRow = new MessageActionRow();
+      currentRow = new ActionRowBuilder();
     }
 
     const label = entry.name.length > 80 ? `${entry.name.slice(0, 77)}...` : entry.name;
 
     currentRow.addComponents(
-      new MessageButton()
+      new ButtonBuilder()
         .setCustomId(buildCutVoteCustomId(entry.normalizedName))
         .setLabel(label)
-        .setStyle("PRIMARY")
+        .setStyle(ButtonStyle.Primary)
     );
   });
 
@@ -238,7 +240,7 @@ async function disableCutPollButtons(activePoll) {
 
   try {
     const channel = await client.channels.fetch(activePoll.channelId);
-    if (!channel || !channel.isText()) {
+    if (!channel || !channel.isTextBased()) {
       return;
     }
 
@@ -248,9 +250,9 @@ async function disableCutPollButtons(activePoll) {
     }
 
     const disabledRows = pollMessage.components.map((row) => {
-      const nextRow = new MessageActionRow();
+      const nextRow = new ActionRowBuilder();
       row.components.forEach((component) => {
-        nextRow.addComponents(MessageButton.from(component).setDisabled(true));
+        nextRow.addComponents(ButtonBuilder.from(component).setDisabled(true));
       });
       return nextRow;
     });
@@ -270,7 +272,7 @@ async function postCutPollResults(guildId, activePoll, tally, endReason, endedBy
     channel = null;
   }
 
-  if (!channel || !channel.isText()) {
+  if (!channel || !channel.isTextBased()) {
     return;
   }
 
@@ -554,7 +556,7 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
 
-  if (!interaction.isCommand()) {
+  if (!interaction.isChatInputCommand()) {
     return;
   }
 
@@ -596,19 +598,19 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    const modal = new Modal()
+    const modal = new ModalBuilder()
       .setCustomId(`setpost:${keyInput}`)
       .setTitle(`Set post: ${keyInput}`);
 
-    const informationInput = new TextInputComponent()
+    const informationInput = new TextInputBuilder()
       .setCustomId("information")
       .setLabel("Information")
-      .setStyle("PARAGRAPH")
+      .setStyle(TextInputStyle.Paragraph)
       .setPlaceholder("Paste your full post here. Line breaks are supported.")
       .setRequired(true)
       .setMaxLength(1900);
 
-    const firstRow = new MessageActionRow().addComponents(informationInput);
+    const firstRow = new ActionRowBuilder().addComponents(informationInput);
     modal.addComponents(firstRow);
 
     await interaction.showModal(modal);

@@ -1,5 +1,5 @@
 require("dotenv").config({ quiet: true });
-const { Client, Intents } = require("discord.js");
+const { Client, GatewayIntentBits } = require("discord.js");
 const { listCommands } = require("./store");
 const { buildGuildCommands } = require("./command-definitions");
 
@@ -18,7 +18,7 @@ if (!token || !clientId || guildIds.length === 0) {
 
 const commands = buildGuildCommands(listCommands());
 
-const client = new Client({ intents: [Intents.FLAGS.GUILDS] });
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 client.once("ready", async () => {
   let failedGuilds = 0;
