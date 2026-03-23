@@ -37,6 +37,7 @@ const CUT_VOTE_CUSTOM_ID_PREFIX = "cutvote:";
 const NOMINATION_EXPIRY_MS = 2 * 60 * 60 * 1000;
 const nominationPurgeTimers = new Map();
 const POST_DRAFT_MODAL_PREFIX = "postdraft:";
+const POST_DRAFT_TEXT_PREFIX = "postdrafttext:";
 const POST_DRAFT_SAVE_PREFIX = "postdraftsave:";
 const POST_DRAFT_EDIT_PREFIX = "postdraftedit:";
 const POST_DRAFT_EMOJI_PREFIX = "postdraftemoji:";
@@ -192,7 +193,7 @@ function buildPostModal(commandName, initialValue = "") {
     .setLabel("Post text")
     .setStyle(TextInputStyle.Paragraph)
     .setPlaceholder("Type the post content here. Line breaks are supported.")
-    .setRequired(true)
+    .setRequired(false)
     .setMaxLength(1900)
     .setValue(initialValue.slice(0, 1900));
 
@@ -200,12 +201,28 @@ function buildPostModal(commandName, initialValue = "") {
   return modal;
 }
 
-function buildPostDraftPreview(commandName, content) {
+function buildPostDraftPreview(commandName, draft) {
+  const text = draft.content && draft.content.trim() ? draft.content : "(No text yet)";
+  const emojiLine = draft.emojis && draft.emojis.length > 0
+    ? draft.emojis.join(" ")
+    : "(No emojis yet)";
+  const imagesLine = draft.images && draft.images.length > 0
+    ? draft.images.join("\n")
+    : "(No images yet)";
+
   return [
     `Preview for !${commandName}:`,
-    content || "(No text content)",
     "",
-    "Add emojis and images, then Save to publish."
+    "Text:",
+    text,
+    "",
+    "Emojis:",
+    emojiLine,
+    "",
+    "Images:",
+    imagesLine,
+    "",
+    "Use Text, Emoji, and Image to build the post, then Save to publish."
   ].join("\n");
 }
 
@@ -213,13 +230,17 @@ function buildPostDraftButtons(commandName) {
   return [
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
+        .setCustomId(`${POST_DRAFT_TEXT_PREFIX}${commandName}`)
+        .setLabel("Text")
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
         .setCustomId(`${POST_DRAFT_EMOJI_PREFIX}${commandName}`)
-        .setLabel("Add Emoji")
+        .setLabel("Emoji")
         .setStyle(ButtonStyle.Primary)
         .setEmoji("😀"),
       new ButtonBuilder()
         .setCustomId(`${POST_DRAFT_IMG_PREFIX}${commandName}`)
-        .setLabel("Add Image")
+        .setLabel("Image")
         .setStyle(ButtonStyle.Primary)
         .setEmoji("➕")
     ),
@@ -227,13 +248,16 @@ function buildPostDraftButtons(commandName) {
       new ButtonBuilder()
         .setCustomId(`${POST_DRAFT_SAVE_PREFIX}${commandName}`)
         .setLabel("Save")
-        .setStyle(ButtonStyle.Success),
-      new ButtonBuilder()
-        .setCustomId(`${POST_DRAFT_EDIT_PREFIX}${commandName}`)
-        .setLabel("Edit")
-        .setStyle(ButtonStyle.Secondary)
+        .setStyle(ButtonStyle.Success)
     )
   ];
+}
+
+async function sendPostDraftPreview(user, commandName, draft) {
+  await user.send({
+    content: buildPostDraftPreview(commandName, draft),
+    components: buildPostDraftButtons(commandName)
+  });
 }
 
 async function syncGuildCommands(guild) {
@@ -541,7 +565,8 @@ client.once("ready", async () => {
 client.on("interactionCreate", async (interaction) => {
   if (
     interaction.isButton() &&
-    (interaction.customId.startsWith(POST_DRAFT_EMOJI_PREFIX) ||
+    (interaction.customId.startsWith(POST_DRAFT_TEXT_PREFIX) ||
+      interaction.customId.startsWith(POST_DRAFT_EMOJI_PREFIX) ||
       interaction.customId.startsWith(POST_DRAFT_IMG_PREFIX))
   ) {
     if (isBotBanned(interaction.user.id)) {
@@ -549,8 +574,10 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
+    const isText = interaction.customId.startsWith(POST_DRAFT_TEXT_PREFIX);
     const isEmoji = interaction.customId.startsWith(POST_DRAFT_EMOJI_PREFIX);
     const commandName = interaction.customId
+      .replace(POST_DRAFT_TEXT_PREFIX, "")
       .replace(POST_DRAFT_EMOJI_PREFIX, "")
       .replace(POST_DRAFT_IMG_PREFIX, "");
 
@@ -558,6 +585,11 @@ client.on("interactionCreate", async (interaction) => {
     const draft = postDrafts.get(draftKey);
     if (!draft) {
       await interaction.reply({ content: "This draft has expired. Run /setpost again.", ephemeral: true });
+      return;
+    }
+
+    if (isText) {
+      await interaction.showModal(buildPostModal(commandName, draft.content || ""));
       return;
     }
 
@@ -605,6 +637,9 @@ client.on("interactionCreate", async (interaction) => {
             draft.images.push(att.url);
           });
         });
+        draft.updatedAt = Date.now();
+
+        await sendPostDraftPreview(interaction.user, commandName, draft);
 
         await interaction.followUp({
           content: `✓ Added ${draft.images.length} image(s) to your post draft.`,
@@ -648,15 +683,21 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     if (isSave) {
-      let finalContent = draft.content;
+      let finalContent = draft.content || "";
       if (draft.emojis && draft.emojis.length > 0) {
-        finalContent += "\n\n" + draft.emojis.join(" ");
+        finalContent = finalContent
+          ? `${finalContent}\n\n${draft.emojis.join(" ")}`
+          : draft.emojis.join(" ");
       }
       const savedKey = upsertCommand(commandName, finalContent, interaction.user.id, draft.images);
       postDrafts.delete(draftKey);
       await syncConfiguredGuilds();
       await interaction.update({
-        content: `${buildPostDraftPreview(savedKey, finalContent)}\n\nSaved. Call it with !${savedKey}.`,
+        content: `${buildPostDraftPreview(savedKey, {
+          content: draft.content || "",
+          emojis: draft.emojis || [],
+          images: draft.images || []
+        })}\n\nSaved. Call it with !${savedKey}.`,
         components: []
       });
       return;
@@ -801,6 +842,42 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
 
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("postemoji:")) {
+    const commandName = interaction.customId.replace("postemoji:", "").trim();
+    const emojiValue = interaction.fields.getTextInputValue("emoji").trim();
+    const draftKey = buildPostDraftKey(interaction.user.id, commandName);
+    const draft = postDrafts.get(draftKey);
+
+    if (!draft) {
+      await interaction.reply({ content: "This draft has expired. Run /setpost again.", ephemeral: true });
+      return;
+    }
+
+    if (!emojiValue) {
+      await interaction.reply({ content: "No emoji text was entered.", ephemeral: true });
+      return;
+    }
+
+    draft.emojis.push(emojiValue);
+    draft.updatedAt = Date.now();
+
+    try {
+      await sendPostDraftPreview(interaction.user, commandName, draft);
+    } catch {
+      await interaction.reply({
+        content: "I could not refresh the DM preview, but the emoji was added to the draft.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    await interaction.reply({
+      content: `Added emoji to /${commandName}. Check your DMs for the updated preview.`,
+      ephemeral: true
+    });
+    return;
+  }
+
   if (interaction.isModalSubmit() && interaction.customId.startsWith(POST_DRAFT_MODAL_PREFIX)) {
     const commandName = interaction.customId.replace(POST_DRAFT_MODAL_PREFIX, "").trim();
     const info = interaction.fields.getTextInputValue("information").trim();
@@ -822,21 +899,19 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     const draftKey = buildPostDraftKey(interaction.user.id, commandName);
+    const existingDraft = postDrafts.get(draftKey);
     postDrafts.set(draftKey, {
       commandName,
       content: info,
-      emojis: [],
-      images: [],
+      emojis: existingDraft && Array.isArray(existingDraft.emojis) ? existingDraft.emojis : [],
+      images: existingDraft && Array.isArray(existingDraft.images) ? existingDraft.images : [],
       updatedAt: Date.now()
     });
 
     try {
-      await interaction.user.send({
-        content: buildPostDraftPreview(commandName, info),
-        components: buildPostDraftButtons(commandName)
-      });
+      await sendPostDraftPreview(interaction.user, commandName, postDrafts.get(draftKey));
       await interaction.reply({
-        content: "Check your DMs for a post preview with Save/Edit buttons.",
+        content: "Check your DMs for the post editor.",
         ephemeral: true
       });
     } catch {
@@ -891,8 +966,28 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     const existing = getCommand(keyInput);
-    const initialValue = existing && typeof existing.content === "string" ? existing.content : "";
-    await interaction.showModal(buildPostModal(keyInput, initialValue));
+    const draftKey = buildPostDraftKey(interaction.user.id, keyInput);
+    const draft = {
+      commandName: keyInput,
+      content: existing && typeof existing.content === "string" ? existing.content : "",
+      emojis: [],
+      images: existing && Array.isArray(existing.attachments) ? [...existing.attachments] : [],
+      updatedAt: Date.now()
+    };
+    postDrafts.set(draftKey, draft);
+
+    try {
+      await sendPostDraftPreview(interaction.user, keyInput, draft);
+      await interaction.reply({
+        content: "Check your DMs for the post editor.",
+        ephemeral: true
+      });
+    } catch {
+      await interaction.reply({
+        content: "I could not DM you. Enable DMs from server members, then try /setpost again.",
+        ephemeral: true
+      });
+    }
     return;
   }
 
@@ -908,15 +1003,13 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    const replyObject = {
-      content: post.content || "(No text content)"
-    };
+    let finalContent = post.content || "(No text content)";
 
     if (post.attachments && post.attachments.length > 0) {
-      replyObject.files = post.attachments;
+      finalContent += "\n\n" + post.attachments.join("\n");
     }
 
-    await interaction.reply(replyObject);
+    await interaction.reply({ content: finalContent });
     return;
   }
 
@@ -1156,7 +1249,7 @@ client.on("interactionCreate", async (interaction) => {
     await interaction.reply({
       content: [
         "SneakyBot Commands:",
-        "- /setpost command:<name> -> open post editor modal and send DM preview with Save/Edit",
+        "- /setpost command:<name> -> open the DM post editor with Text, Emoji, Image, and Save",
         "- /<name> -> show the saved post for that command",
         "- /post command:<name> -> show saved post by command name",
         "- /list post -> list all saved post command names",
