@@ -39,6 +39,8 @@ const nominationPurgeTimers = new Map();
 const POST_DRAFT_MODAL_PREFIX = "postdraft:";
 const POST_DRAFT_SAVE_PREFIX = "postdraftsave:";
 const POST_DRAFT_EDIT_PREFIX = "postdraftedit:";
+const POST_DRAFT_EMOJI_PREFIX = "postdraftemoji:";
+const POST_DRAFT_IMG_PREFIX = "postdraftimg:";
 const postDrafts = new Map();
 
 const cutPollChannelIds = (process.env.CUT_POLL_CHANNEL_ID || "")
@@ -203,12 +205,24 @@ function buildPostDraftPreview(commandName, content) {
     `Preview for !${commandName}:`,
     content || "(No text content)",
     "",
-    "Use Save to publish or Edit to change it."
+    "Add emojis and images, then Save to publish."
   ].join("\n");
 }
 
 function buildPostDraftButtons(commandName) {
   return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${POST_DRAFT_EMOJI_PREFIX}${commandName}`)
+        .setLabel("Add Emoji")
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji("😀"),
+      new ButtonBuilder()
+        .setCustomId(`${POST_DRAFT_IMG_PREFIX}${commandName}`)
+        .setLabel("Add Image")
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji("➕")
+    ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`${POST_DRAFT_SAVE_PREFIX}${commandName}`)
@@ -527,6 +541,87 @@ client.once("ready", async () => {
 client.on("interactionCreate", async (interaction) => {
   if (
     interaction.isButton() &&
+    (interaction.customId.startsWith(POST_DRAFT_EMOJI_PREFIX) ||
+      interaction.customId.startsWith(POST_DRAFT_IMG_PREFIX))
+  ) {
+    if (isBotBanned(interaction.user.id)) {
+      await interaction.reply({ content: "You are not allowed to use this bot.", ephemeral: true });
+      return;
+    }
+
+    const isEmoji = interaction.customId.startsWith(POST_DRAFT_EMOJI_PREFIX);
+    const commandName = interaction.customId
+      .replace(POST_DRAFT_EMOJI_PREFIX, "")
+      .replace(POST_DRAFT_IMG_PREFIX, "");
+
+    const draftKey = buildPostDraftKey(interaction.user.id, commandName);
+    const draft = postDrafts.get(draftKey);
+    if (!draft) {
+      await interaction.reply({ content: "This draft has expired. Run /setpost again.", ephemeral: true });
+      return;
+    }
+
+    if (isEmoji) {
+      const modal = new ModalBuilder()
+        .setCustomId(`postemoji:${commandName}`)
+        .setTitle("Add Emoji");
+
+      const emojiInput = new TextInputBuilder()
+        .setCustomId("emoji")
+        .setLabel("Emoji or emoji text")
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder("😀 or fire emoji or :fire:")
+        .setRequired(true)
+        .setMaxLength(100);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(emojiInput));
+      await interaction.showModal(modal);
+      return;
+    }
+
+    await interaction.reply({
+      content: "Upload image(s) in this DM. I'll collect them for the next 60 seconds.",
+      ephemeral: false
+    });
+
+    const userId = interaction.user.id;
+    const dms = interaction.user.dmChannel || await interaction.user.createDM();
+
+    const messageFilter = (msg) => {
+      return msg.author.id === userId && msg.attachments.size > 0;
+    };
+
+    try {
+      const collected = await dms.awaitMessages({
+        filter: messageFilter,
+        max: 5,
+        time: 60000,
+        errors: ["time"]
+      });
+
+      if (collected.size > 0) {
+        collected.forEach((msg) => {
+          msg.attachments.forEach((att) => {
+            draft.images.push(att.url);
+          });
+        });
+
+        await interaction.followUp({
+          content: `✓ Added ${draft.images.length} image(s) to your post draft.`,
+          ephemeral: false
+        });
+      }
+    } catch (error) {
+      await interaction.followUp({
+        content: "Timed out waiting for images. You can try adding them again.",
+        ephemeral: false
+      });
+    }
+    return;
+  }
+
+  if (
+    interaction.isButton() &&
     (interaction.customId.startsWith(POST_DRAFT_SAVE_PREFIX) ||
       interaction.customId.startsWith(POST_DRAFT_EDIT_PREFIX))
   ) {
@@ -553,11 +648,15 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     if (isSave) {
-      const savedKey = upsertCommand(commandName, draft.content, interaction.user.id);
+      let finalContent = draft.content;
+      if (draft.emojis && draft.emojis.length > 0) {
+        finalContent += "\n\n" + draft.emojis.join(" ");
+      }
+      const savedKey = upsertCommand(commandName, finalContent, interaction.user.id, draft.images);
       postDrafts.delete(draftKey);
       await syncConfiguredGuilds();
       await interaction.update({
-        content: `${buildPostDraftPreview(savedKey, draft.content)}\n\nSaved. Call it with !${savedKey}.`,
+        content: `${buildPostDraftPreview(savedKey, finalContent)}\n\nSaved. Call it with !${savedKey}.`,
         components: []
       });
       return;
@@ -726,6 +825,8 @@ client.on("interactionCreate", async (interaction) => {
     postDrafts.set(draftKey, {
       commandName,
       content: info,
+      emojis: [],
+      images: [],
       updatedAt: Date.now()
     });
 
@@ -1075,15 +1176,15 @@ client.on("interactionCreate", async (interaction) => {
 
   const dynamicPost = getCommand(commandName);
   if (dynamicPost) {
-    const replyObject = {
-      content: dynamicPost.content || "(No text content)"
-    };
+    let finalContent = dynamicPost.content || "(No text content)";
 
     if (dynamicPost.attachments && dynamicPost.attachments.length > 0) {
-      replyObject.files = dynamicPost.attachments;
+      finalContent += "\n\n" + dynamicPost.attachments.join("\n");
     }
 
-    await interaction.reply(replyObject);
+    await interaction.reply({
+      content: finalContent
+    });
   }
 });
 
@@ -1168,15 +1269,15 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  const replyObject = {
-    content: post.content || "(No text content)"
-  };
+  let finalContent = post.content || "(No text content)";
 
   if (post.attachments && post.attachments.length > 0) {
-    replyObject.files = post.attachments;
+    finalContent += "\n\n" + post.attachments.join("\n");
   }
 
-  await message.channel.send(replyObject);
+  await message.channel.send({
+    content: finalContent
+  });
 });
 
 client.login(token);
