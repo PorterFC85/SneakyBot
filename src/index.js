@@ -32,7 +32,10 @@ const { RESERVED_COMMANDS, buildGuildCommands } = require("./command-definitions
 
 const CUT_POLL_DURATION_MS = 5 * 60 * 1000;
 const CUT_VOTE_CUSTOM_ID_PREFIX = "cutvote:";
-const cutPollChannelId = (process.env.CUT_POLL_CHANNEL_ID || "").trim();
+const cutPollChannelIds = (process.env.CUT_POLL_CHANNEL_ID || "")
+  .split(",")
+  .map((id) => id.trim())
+  .filter(Boolean);
 
 const token = process.env.DISCORD_TOKEN;
 const guildIdsRaw = process.env.DISCORD_GUILD_IDS || process.env.DISCORD_GUILD_ID || "";
@@ -99,19 +102,20 @@ function canUseBot(interaction) {
 }
 
 function isCutPollChannel(channelId) {
-  if (!cutPollChannelId) {
+  if (cutPollChannelIds.length === 0) {
     return true;
   }
 
-  return channelId === cutPollChannelId;
+  return cutPollChannelIds.includes(channelId);
 }
 
 function getCutPollChannelWarning() {
-  if (!cutPollChannelId) {
+  if (cutPollChannelIds.length === 0) {
     return "Cut poll channel is not configured. Ask an admin to set CUT_POLL_CHANNEL_ID in .env.";
   }
 
-  return `Cut poll commands can only be used in <#${cutPollChannelId}>.`;
+  const mentions = cutPollChannelIds.map((id) => `<#${id}>`).join(" or ");
+  return `Cut poll commands can only be used in ${mentions}.`;
 }
 
 async function syncGuildCommands(guild) {
