@@ -735,11 +735,11 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       upsertCutNomination(guildId, person, reason, interaction.user.id);
-      const queueSize = getQueuedCutNominations(guildId).length;
       await interaction.reply({
-        content: `Nomination saved for ${person}. Current queue size: ${queueSize}.`,
-        ephemeral: false
+        content: "Nomination submitted.",
+        ephemeral: true
       });
+      await interaction.channel.send(`Nomination added - ${person}`);
       return;
     }
 
