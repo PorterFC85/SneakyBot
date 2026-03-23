@@ -1,11 +1,11 @@
 const BASE_COMMANDS = [
   {
     name: "setpost",
-    description: "Create or update a stored post tied to a command name",
+    description: "Create or update a post using a modal draft",
     options: [
       {
         name: "command",
-        description: "Command name, like raid-rules",
+        description: "Command name to create or edit",
         type: 3,
         required: true
       }

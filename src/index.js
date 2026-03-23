@@ -36,6 +36,10 @@ const CUT_POLL_DURATION_MS = 5 * 60 * 1000;
 const CUT_VOTE_CUSTOM_ID_PREFIX = "cutvote:";
 const NOMINATION_EXPIRY_MS = 2 * 60 * 60 * 1000;
 const nominationPurgeTimers = new Map();
+const POST_DRAFT_MODAL_PREFIX = "postdraft:";
+const POST_DRAFT_SAVE_PREFIX = "postdraftsave:";
+const POST_DRAFT_EDIT_PREFIX = "postdraftedit:";
+const postDrafts = new Map();
 
 const cutPollChannelIds = (process.env.CUT_POLL_CHANNEL_ID || "")
   .split(",")
@@ -53,6 +57,14 @@ const allowedUserIds = (process.env.ALLOWED_USER_IDS || "")
   .map((id) => id.trim())
   .filter(Boolean);
 const allowedRoleIds = (process.env.ALLOWED_ROLE_IDS || "")
+  .split(",")
+  .map((id) => id.trim())
+  .filter(Boolean);
+const botAdminUserIds = (process.env.BOT_ADMIN_USER_IDS || "")
+  .split(",")
+  .map((id) => id.trim())
+  .filter(Boolean);
+const botBannedUserIds = (process.env.BOT_BANNED_USER_IDS || "")
   .split(",")
   .map((id) => id.trim())
   .filter(Boolean);
@@ -77,6 +89,14 @@ function hasManageGuildPermission(interaction) {
   return interaction.memberPermissions.has(PermissionsBitField.Flags.ManageGuild);
 }
 
+function isBotAdmin(userId) {
+  return botAdminUserIds.includes(userId);
+}
+
+function isBotBanned(userId) {
+  return botBannedUserIds.includes(userId);
+}
+
 function hasAllowedRole(interaction) {
   const roleCache = interaction.member && interaction.member.roles && interaction.member.roles.cache;
   if (!roleCache || allowedRoleIds.length === 0) {
@@ -89,6 +109,14 @@ function hasAllowedRole(interaction) {
 function canUseBot(interaction) {
   if (!interaction.inGuild()) {
     return false;
+  }
+
+  if (isBotBanned(interaction.user.id)) {
+    return false;
+  }
+
+  if (isBotAdmin(interaction.user.id)) {
+    return true;
   }
 
   if (!accessControlEnabled) {
@@ -104,6 +132,10 @@ function canUseBot(interaction) {
   }
 
   return hasAllowedRole(interaction);
+}
+
+function canManagePosts(interaction) {
+  return hasManageGuildPermission(interaction) || isBotAdmin(interaction.user.id);
 }
 
 function scheduleNominationPurge(guildId, delayMs) {
@@ -142,6 +174,52 @@ function getCutPollChannelWarning() {
 
   const mentions = cutPollChannelIds.map((id) => `<#${id}>`).join(" or ");
   return `Cut poll commands can only be used in ${mentions}.`;
+}
+
+function buildPostDraftKey(userId, commandName) {
+  return `${userId}:${commandName.toLowerCase()}`;
+}
+
+function buildPostModal(commandName, initialValue = "") {
+  const modal = new ModalBuilder()
+    .setCustomId(`${POST_DRAFT_MODAL_PREFIX}${commandName}`)
+    .setTitle(`Edit post: ${commandName}`);
+
+  const informationInput = new TextInputBuilder()
+    .setCustomId("information")
+    .setLabel("Post text")
+    .setStyle(TextInputStyle.Paragraph)
+    .setPlaceholder("Type the post content here. Line breaks are supported.")
+    .setRequired(true)
+    .setMaxLength(1900)
+    .setValue(initialValue.slice(0, 1900));
+
+  modal.addComponents(new ActionRowBuilder().addComponents(informationInput));
+  return modal;
+}
+
+function buildPostDraftPreview(commandName, content) {
+  return [
+    `Preview for !${commandName}:`,
+    content || "(No text content)",
+    "",
+    "Use Save to publish or Edit to change it."
+  ].join("\n");
+}
+
+function buildPostDraftButtons(commandName) {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${POST_DRAFT_SAVE_PREFIX}${commandName}`)
+        .setLabel("Save")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`${POST_DRAFT_EDIT_PREFIX}${commandName}`)
+        .setLabel("Edit")
+        .setStyle(ButtonStyle.Secondary)
+    )
+  ];
 }
 
 async function syncGuildCommands(guild) {
@@ -447,6 +525,48 @@ client.once("ready", async () => {
 });
 
 client.on("interactionCreate", async (interaction) => {
+  if (
+    interaction.isButton() &&
+    (interaction.customId.startsWith(POST_DRAFT_SAVE_PREFIX) ||
+      interaction.customId.startsWith(POST_DRAFT_EDIT_PREFIX))
+  ) {
+    if (isBotBanned(interaction.user.id)) {
+      await interaction.reply({ content: "You are not allowed to use this bot.", ephemeral: true });
+      return;
+    }
+
+    const isSave = interaction.customId.startsWith(POST_DRAFT_SAVE_PREFIX);
+    const commandName = interaction.customId
+      .replace(POST_DRAFT_SAVE_PREFIX, "")
+      .replace(POST_DRAFT_EDIT_PREFIX, "");
+
+    if (!isValidCommandName(commandName)) {
+      await interaction.reply({ content: "This draft is invalid or expired.", ephemeral: true });
+      return;
+    }
+
+    const draftKey = buildPostDraftKey(interaction.user.id, commandName);
+    const draft = postDrafts.get(draftKey);
+    if (!draft) {
+      await interaction.reply({ content: "This draft has expired. Run /setpost again.", ephemeral: true });
+      return;
+    }
+
+    if (isSave) {
+      const savedKey = upsertCommand(commandName, draft.content, interaction.user.id);
+      postDrafts.delete(draftKey);
+      await syncConfiguredGuilds();
+      await interaction.update({
+        content: `${buildPostDraftPreview(savedKey, draft.content)}\n\nSaved. Call it with !${savedKey}.`,
+        components: []
+      });
+      return;
+    }
+
+    await interaction.showModal(buildPostModal(commandName, draft.content));
+    return;
+  }
+
   if (interaction.isButton() && interaction.customId.startsWith(CUT_VOTE_CUSTOM_ID_PREFIX)) {
     if (!canUseBot(interaction)) {
       await interaction.reply({
@@ -582,36 +702,19 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
 
-  if (interaction.isModalSubmit() && interaction.customId.startsWith("setpost:")) {
-    if (!canUseBot(interaction)) {
+  if (interaction.isModalSubmit() && interaction.customId.startsWith(POST_DRAFT_MODAL_PREFIX)) {
+    const commandName = interaction.customId.replace(POST_DRAFT_MODAL_PREFIX, "").trim();
+    const info = interaction.fields.getTextInputValue("information").trim();
+
+    if (!isValidCommandName(commandName)) {
       await interaction.reply({
-        content: "You are not allowed to use this bot.",
+        content: "Invalid command name. Use 2-32 chars: letters, numbers, underscore, or hyphen.",
         ephemeral: true
       });
       return;
     }
 
-    const keyInput = interaction.customId.replace("setpost:", "");
-    const info = interaction.fields.getTextInputValue("information");
-
-    if (!hasManageGuildPermission(interaction)) {
-      await interaction.reply({
-        content: "You need the Manage Server permission to create or update posts.",
-        ephemeral: true
-      });
-      return;
-    }
-
-    if (!isValidCommandName(keyInput)) {
-      await interaction.reply({
-        content:
-          "Invalid command name. Use 2-32 chars: letters, numbers, underscore, or hyphen.",
-        ephemeral: true
-      });
-      return;
-    }
-
-    if (RESERVED_COMMANDS.has(keyInput.toLowerCase())) {
+    if (RESERVED_COMMANDS.has(commandName.toLowerCase())) {
       await interaction.reply({
         content: "That command name is reserved. Please choose a different name.",
         ephemeral: true
@@ -619,54 +722,28 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    const savedKey = upsertCommand(keyInput, info, interaction.user.id);
-
-    await interaction.reply({
-      content: `Text saved for /${savedKey}. To add images/files, post them in this channel within the next 60 seconds and I'll attach them.`,
-      ephemeral: false
+    const draftKey = buildPostDraftKey(interaction.user.id, commandName);
+    postDrafts.set(draftKey, {
+      commandName,
+      content: info,
+      updatedAt: Date.now()
     });
 
-    const channel = interaction.channel;
-    const userId = interaction.user.id;
-
-    const messageFilter = (msg) => {
-      return msg.author.id === userId && msg.attachments.size > 0;
-    };
-
     try {
-      const collected = await channel.awaitMessages({
-        filter: messageFilter,
-        max: 1,
-        time: 60000,
-        errors: ["time"]
+      await interaction.user.send({
+        content: buildPostDraftPreview(commandName, info),
+        components: buildPostDraftButtons(commandName)
       });
-
-      if (collected.size > 0) {
-        const msg = collected.first();
-        const attachmentUrls = msg.attachments.map((att) => att.url);
-
-        upsertCommand(keyInput, info, interaction.user.id, attachmentUrls);
-        await syncConfiguredGuilds();
-
-        await interaction.followUp({
-          content: `✓ Attached ${attachmentUrls.length} file(s) to /${savedKey}`,
-          ephemeral: true
-        });
-
-        try {
-          await msg.delete();
-        } catch {
-          // silently fail if can't delete
-        }
-      }
-    } catch (error) {
-      await interaction.followUp({
-        content: "Timed out waiting for attachments. Post saved without images.",
+      await interaction.reply({
+        content: "Check your DMs for a post preview with Save/Edit buttons.",
+        ephemeral: true
+      });
+    } catch {
+      await interaction.reply({
+        content: "I could not DM you. Enable DMs from server members, then try /setpost again.",
         ephemeral: true
       });
     }
-
-    await syncConfiguredGuilds();
     return;
   }
 
@@ -687,9 +764,9 @@ client.on("interactionCreate", async (interaction) => {
   if (commandName === "setpost") {
     const keyInput = interaction.options.getString("command", true);
 
-    if (!hasManageGuildPermission(interaction)) {
+    if (!canManagePosts(interaction)) {
       await interaction.reply({
-        content: "You need the Manage Server permission to create or update posts.",
+        content: "You need Manage Server permission or BOT_ADMIN_USER_IDS access to create or update posts.",
         ephemeral: true
       });
       return;
@@ -712,22 +789,9 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    const modal = new ModalBuilder()
-      .setCustomId(`setpost:${keyInput}`)
-      .setTitle(`Set post: ${keyInput}`);
-
-    const informationInput = new TextInputBuilder()
-      .setCustomId("information")
-      .setLabel("Information")
-      .setStyle(TextInputStyle.Paragraph)
-      .setPlaceholder("Paste your full post here. Line breaks are supported.")
-      .setRequired(true)
-      .setMaxLength(1900);
-
-    const firstRow = new ActionRowBuilder().addComponents(informationInput);
-    modal.addComponents(firstRow);
-
-    await interaction.showModal(modal);
+    const existing = getCommand(keyInput);
+    const initialValue = existing && typeof existing.content === "string" ? existing.content : "";
+    await interaction.showModal(buildPostModal(keyInput, initialValue));
     return;
   }
 
@@ -758,9 +822,9 @@ client.on("interactionCreate", async (interaction) => {
   if (commandName === "deletepost") {
     const keyInput = interaction.options.getString("command", true);
 
-    if (!hasManageGuildPermission(interaction)) {
+    if (!canManagePosts(interaction)) {
       await interaction.reply({
-        content: "You need the Manage Server permission to delete posts.",
+        content: "You need Manage Server permission or BOT_ADMIN_USER_IDS access to delete posts.",
         ephemeral: true
       });
       return;
@@ -991,9 +1055,9 @@ client.on("interactionCreate", async (interaction) => {
     await interaction.reply({
       content: [
         "SneakyBot Commands:",
-        "- /setpost command:<name> -> open modal to save or update a post",
+        "- /setpost command:<name> -> open post editor modal and send DM preview with Save/Edit",
         "- /<name> -> show the saved post for that command",
-        "- /post command:<name> -> fallback lookup by command name",
+        "- /post command:<name> -> show saved post by command name",
         "- /list post -> list all saved post command names",
         "- /deletepost command:<name> -> delete a saved post",
         "- /nominate -> open modal to nominate one or more people (one name per line)",
@@ -1028,14 +1092,43 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
+  if (isBotBanned(message.author.id)) {
+    return;
+  }
+
   const raw = message.content.trim();
   if (!raw.startsWith("!")) {
     return;
   }
 
+  if (accessControlEnabled) {
+    const hasManage = Boolean(
+      message.member && message.member.permissions
+        && message.member.permissions.has(PermissionsBitField.Flags.ManageGuild)
+    );
+    const hasAllowedUser = allowedUserIds.includes(message.author.id);
+    const hasAllowed = hasManage || hasAllowedUser || hasAllowedRole({ member: message.member });
+
+    if (!hasAllowed && !isBotAdmin(message.author.id)) {
+      return;
+    }
+  }
+
   const setMatch = raw.match(/^!set\s+(\S+)\s+([\s\S]+)$/i);
 
   if (setMatch) {
+    const canManageFromMessage = Boolean(
+      message.member && message.member.permissions
+        && message.member.permissions.has(PermissionsBitField.Flags.ManageGuild)
+    ) || isBotAdmin(message.author.id);
+
+    if (!canManageFromMessage) {
+      await message.reply(
+        "You need Manage Server permission or BOT_ADMIN_USER_IDS access to create or update posts."
+      );
+      return;
+    }
+
     const keyInput = setMatch[1].trim();
     const info = setMatch[2].trim();
 
