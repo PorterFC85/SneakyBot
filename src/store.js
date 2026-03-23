@@ -65,6 +65,10 @@ function ensureGuildCutState(store, guildId) {
     store.cutPolls[guildId].queuedNominations = [];
   }
 
+  if (typeof store.cutPolls[guildId].nominationQueueStartedAt === "undefined") {
+    store.cutPolls[guildId].nominationQueueStartedAt = null;
+  }
+
   if (typeof store.cutPolls[guildId].activePoll === "undefined") {
     store.cutPolls[guildId].activePoll = null;
   }
@@ -133,13 +137,17 @@ function upsertCutNomination(guildId, personName, reason, nominatedBy) {
   };
 
   if (existingIndex >= 0) {
-    queue[existingIndex] = nomination;
-  } else {
-    queue.push(nomination);
+    return false;
   }
 
+  const wasEmpty = queue.length === 0;
+  queue.push(nomination);
+
+  if (wasEmpty) {
+    store.cutPolls[guildId].nominationQueueStartedAt = new Date().toISOString();
+  }
   writeStore(store);
-  return nomination;
+  return true;
 }
 
 function getQueuedCutNominations(guildId) {
@@ -152,6 +160,7 @@ function clearQueuedCutNominations(guildId) {
   const store = readStore();
   ensureGuildCutState(store, guildId);
   store.cutPolls[guildId].queuedNominations = [];
+  store.cutPolls[guildId].nominationQueueStartedAt = null;
   writeStore(store);
 }
 
@@ -183,6 +192,7 @@ function startCutPoll(guildId, activePoll) {
 
   store.cutPolls[guildId].activePoll = activePoll;
   store.cutPolls[guildId].queuedNominations = [];
+  store.cutPolls[guildId].nominationQueueStartedAt = null;
   writeStore(store);
 }
 
@@ -262,6 +272,13 @@ function getLastCutPollResult(guildId) {
 }
 
 module.exports = {
+  function getQueueStartedAt(guildId) {
+    const store = readStore();
+    ensureGuildCutState(store, guildId);
+    return store.cutPolls[guildId].nominationQueueStartedAt || null;
+  }
+
+  module.exports = {
   isValidCommandName,
   upsertCommand,
   getCommand,
@@ -270,6 +287,7 @@ module.exports = {
   upsertCutNomination,
   getQueuedCutNominations,
   clearQueuedCutNominations,
+  getQueueStartedAt,
   findCutReason,
   startCutPoll,
   getActiveCutPoll,

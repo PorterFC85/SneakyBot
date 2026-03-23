@@ -18,6 +18,8 @@ const {
   listCommands,
   upsertCutNomination,
   getQueuedCutNominations,
+  clearQueuedCutNominations,
+  getQueueStartedAt,
   findCutReason,
   startCutPoll,
   getActiveCutPoll,
@@ -32,6 +34,9 @@ const { RESERVED_COMMANDS, buildGuildCommands } = require("./command-definitions
 
 const CUT_POLL_DURATION_MS = 5 * 60 * 1000;
 const CUT_VOTE_CUSTOM_ID_PREFIX = "cutvote:";
+const NOMINATION_EXPIRY_MS = 2 * 60 * 60 * 1000;
+const nominationPurgeTimers = new Map();
+
 const cutPollChannelIds = (process.env.CUT_POLL_CHANNEL_ID || "")
   .split(",")
   .map((id) => id.trim())
@@ -102,6 +107,28 @@ function canUseBot(interaction) {
 }
 
 function isCutPollChannel(channelId) {
+  function scheduleNominationPurge(guildId, delayMs) {
+    const existing = nominationPurgeTimers.get(guildId);
+    if (existing) clearTimeout(existing);
+
+    const timer = setTimeout(() => {
+      nominationPurgeTimers.delete(guildId);
+      clearQueuedCutNominations(guildId);
+      console.log(`[NominationPurge] Cleared stale nominations for guild ${guildId} after 2 hours.`);
+    }, delayMs);
+
+    nominationPurgeTimers.set(guildId, timer);
+  }
+
+  function cancelNominationPurge(guildId) {
+    const existing = nominationPurgeTimers.get(guildId);
+    if (existing) {
+      clearTimeout(existing);
+      nominationPurgeTimers.delete(guildId);
+    }
+  }
+
+  function isCutPollChannel(channelId) {
   if (cutPollChannelIds.length === 0) {
     return true;
   }
@@ -393,6 +420,27 @@ client.once("ready", async () => {
     const restoredPolls = restoreActiveCutPollTimeouts();
     if (restoredPolls > 0) {
       console.log(`Recovered ${restoredPolls} active cut poll timeout(s).`);
+
+        let restoredPurges = 0;
+        for (const guildId of configuredGuildIds) {
+          const startedAt = getQueueStartedAt(guildId);
+          if (!startedAt) continue;
+          const activePoll = getActiveCutPoll(guildId);
+          if (activePoll) continue;
+          const elapsed = Date.now() - new Date(startedAt).getTime();
+          const remaining = NOMINATION_EXPIRY_MS - elapsed;
+          if (remaining <= 0) {
+            clearQueuedCutNominations(guildId);
+            console.log(`[NominationPurge] Cleared expired nominations for guild ${guildId} on startup.`);
+          } else {
+            scheduleNominationPurge(guildId, remaining);
+            restoredPurges++;
+          }
+        }
+        if (restoredPurges > 0) {
+          console.log(`Recovered ${restoredPurges} nomination purge timer(s).`);
+        }
+
     }
   } catch (error) {
     console.error("Failed to synchronize slash commands:", error);
@@ -469,6 +517,70 @@ client.on("interactionCreate", async (interaction) => {
       content: `Vote recorded for ${selectedEntry ? selectedEntry.name : "that option"}. You can vote for more than one person.`,
       ephemeral: true
     });
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId === "nominate") {
+    if (!canUseBot(interaction)) {
+      await interaction.reply({ content: "You are not allowed to use this bot.", ephemeral: true });
+      return;
+    }
+
+    const guildId = interaction.guildId;
+
+    if (!isCutPollChannel(interaction.channelId)) {
+      await interaction.reply({ content: getCutPollChannelWarning(), ephemeral: true });
+      return;
+    }
+
+    const activePoll = getActiveCutPoll(guildId);
+    if (activePoll) {
+      await interaction.reply({
+        content: "A cut poll is already active. Wait for it to end before adding nominations.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    const rawInput = interaction.fields.getTextInputValue("nominees");
+    const names = rawInput
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    if (names.length === 0) {
+      await interaction.reply({ content: "No names were entered.", ephemeral: true });
+      return;
+    }
+
+    const tooLong = names.find((n) => n.length > 80);
+    if (tooLong) {
+      await interaction.reply({
+        content: `Name too long (max 80 chars): ${tooLong}`,
+        ephemeral: true
+      });
+      return;
+    }
+
+    const added = [];
+    for (const name of names) {
+      const isNew = upsertCutNomination(guildId, name, "", interaction.user.id);
+      if (isNew) added.push(name);
+    }
+
+    await interaction.reply({ content: "Nominations submitted.", ephemeral: true });
+
+    for (const name of added) {
+      await interaction.channel.send(`Nomination added - ${name}`);
+
+        if (added.length > 0) {
+          const startedAt = getQueueStartedAt(guildId);
+          const elapsed = startedAt ? Date.now() - new Date(startedAt).getTime() : 0;
+          const remaining = Math.max(NOMINATION_EXPIRY_MS - elapsed, 0);
+          scheduleNominationPurge(guildId, remaining);
+        }
+
+    }
     return;
   }
 
@@ -697,6 +809,38 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
 
+  if (commandName === "nominate") {
+    if (!isCutPollChannel(interaction.channelId)) {
+      await interaction.reply({ content: getCutPollChannelWarning(), ephemeral: true });
+      return;
+    }
+
+    const activePoll = getActiveCutPoll(interaction.guildId);
+    if (activePoll) {
+      await interaction.reply({
+        content: "A cut poll is already active. Wait for it to end before adding nominations.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    const modal = new ModalBuilder()
+      .setCustomId("nominate")
+      .setTitle("Nominate for Cut Poll");
+
+    const nomineeInput = new TextInputBuilder()
+      .setCustomId("nominees")
+      .setLabel("Names to nominate (one per line)")
+      .setStyle(TextInputStyle.Paragraph)
+      .setPlaceholder("Player One\nPlayer Two\nPlayer Three")
+      .setRequired(true)
+      .setMaxLength(1000);
+
+    modal.addComponents(new ActionRowBuilder().addComponents(nomineeInput));
+    await interaction.showModal(modal);
+    return;
+  }
+
   if (commandName === "cut") {
     const subcommand = interaction.options.getSubcommand();
     const guildId = interaction.guildId;
@@ -706,44 +850,6 @@ client.on("interactionCreate", async (interaction) => {
         content: getCutPollChannelWarning(),
         ephemeral: true
       });
-      return;
-    }
-
-    if (subcommand === "nominate") {
-      const activePoll = getActiveCutPoll(guildId);
-      if (activePoll) {
-        await interaction.reply({
-          content: "A cut poll is already active. Wait for it to end before adding nominations.",
-          ephemeral: true
-        });
-        return;
-      }
-
-      const person = interaction.options.getString("person", true).trim();
-      const reason = interaction.options.getString("reason", true).trim();
-
-      if (!person || !reason) {
-        await interaction.reply({
-          content: "Both person and reason are required.",
-          ephemeral: true
-        });
-        return;
-      }
-
-      if (person.length > 80) {
-        await interaction.reply({
-          content: "Person name must be 80 characters or fewer.",
-          ephemeral: true
-        });
-        return;
-      }
-
-      upsertCutNomination(guildId, person, reason, interaction.user.id);
-      await interaction.reply({
-        content: "Nomination submitted.",
-        ephemeral: true
-      });
-      await interaction.channel.send(`Nomination added - ${person}`);
       return;
     }
 
@@ -820,6 +926,7 @@ client.on("interactionCreate", async (interaction) => {
         votes: {}
       });
       scheduleCutPollTimeout(guildId, expiresAt);
+        cancelNominationPurge(guildId);
       return;
     }
 
@@ -891,7 +998,7 @@ client.on("interactionCreate", async (interaction) => {
         "- /post command:<name> -> fallback lookup by command name",
         "- /list post -> list all saved post command names",
         "- /deletepost command:<name> -> delete a saved post",
-        "- /cut nominate person:<name> reason:<text> -> queue a person for the next cut poll",
+        "- /nominate -> open modal to nominate one or more people (one name per line)",
         "- /cut why person:<name> -> show that person's stored reason (ephemeral)",
         "- /cut vote -> start a 5 minute button poll using queued nominations",
         "- /cut end -> end the active cut poll and post results",

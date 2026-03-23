@@ -60,28 +60,13 @@ const BASE_COMMANDS = [
     ]
   },
   {
+    name: "nominate",
+    description: "Nominate one or more people for the cut poll"
+  },
+  {
     name: "cut",
     description: "Manage cut nominations and voting polls",
     options: [
-      {
-        name: "nominate",
-        description: "Nominate a person with a reason",
-        type: 1,
-        options: [
-          {
-            name: "person",
-            description: "Person name to nominate",
-            type: 3,
-            required: true
-          },
-          {
-            name: "reason",
-            description: "Reason for the nomination",
-            type: 3,
-            required: true
-          }
-        ]
-      },
       {
         name: "why",
         description: "Show the reason for a nominated person",
