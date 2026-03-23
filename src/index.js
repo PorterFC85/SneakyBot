@@ -106,29 +106,28 @@ function canUseBot(interaction) {
   return hasAllowedRole(interaction);
 }
 
+function scheduleNominationPurge(guildId, delayMs) {
+  const existing = nominationPurgeTimers.get(guildId);
+  if (existing) clearTimeout(existing);
+
+  const timer = setTimeout(() => {
+    nominationPurgeTimers.delete(guildId);
+    clearQueuedCutNominations(guildId);
+    console.log(`[NominationPurge] Cleared stale nominations for guild ${guildId} after 2 hours.`);
+  }, delayMs);
+
+  nominationPurgeTimers.set(guildId, timer);
+}
+
+function cancelNominationPurge(guildId) {
+  const existing = nominationPurgeTimers.get(guildId);
+  if (existing) {
+    clearTimeout(existing);
+    nominationPurgeTimers.delete(guildId);
+  }
+}
+
 function isCutPollChannel(channelId) {
-  function scheduleNominationPurge(guildId, delayMs) {
-    const existing = nominationPurgeTimers.get(guildId);
-    if (existing) clearTimeout(existing);
-
-    const timer = setTimeout(() => {
-      nominationPurgeTimers.delete(guildId);
-      clearQueuedCutNominations(guildId);
-      console.log(`[NominationPurge] Cleared stale nominations for guild ${guildId} after 2 hours.`);
-    }, delayMs);
-
-    nominationPurgeTimers.set(guildId, timer);
-  }
-
-  function cancelNominationPurge(guildId) {
-    const existing = nominationPurgeTimers.get(guildId);
-    if (existing) {
-      clearTimeout(existing);
-      nominationPurgeTimers.delete(guildId);
-    }
-  }
-
-  function isCutPollChannel(channelId) {
   if (cutPollChannelIds.length === 0) {
     return true;
   }
@@ -420,28 +419,28 @@ client.once("ready", async () => {
     const restoredPolls = restoreActiveCutPollTimeouts();
     if (restoredPolls > 0) {
       console.log(`Recovered ${restoredPolls} active cut poll timeout(s).`);
-
-        let restoredPurges = 0;
-        for (const guildId of configuredGuildIds) {
-          const startedAt = getQueueStartedAt(guildId);
-          if (!startedAt) continue;
-          const activePoll = getActiveCutPoll(guildId);
-          if (activePoll) continue;
-          const elapsed = Date.now() - new Date(startedAt).getTime();
-          const remaining = NOMINATION_EXPIRY_MS - elapsed;
-          if (remaining <= 0) {
-            clearQueuedCutNominations(guildId);
-            console.log(`[NominationPurge] Cleared expired nominations for guild ${guildId} on startup.`);
-          } else {
-            scheduleNominationPurge(guildId, remaining);
-            restoredPurges++;
-          }
-        }
-        if (restoredPurges > 0) {
-          console.log(`Recovered ${restoredPurges} nomination purge timer(s).`);
-        }
-
     }
+
+    let restoredPurges = 0;
+    for (const guildId of configuredGuildIds) {
+      const startedAt = getQueueStartedAt(guildId);
+      if (!startedAt) continue;
+      const activePoll = getActiveCutPoll(guildId);
+      if (activePoll) continue;
+      const elapsed = Date.now() - new Date(startedAt).getTime();
+      const remaining = NOMINATION_EXPIRY_MS - elapsed;
+      if (remaining <= 0) {
+        clearQueuedCutNominations(guildId);
+        console.log(`[NominationPurge] Cleared expired nominations for guild ${guildId} on startup.`);
+      } else {
+        scheduleNominationPurge(guildId, remaining);
+        restoredPurges++;
+      }
+    }
+    if (restoredPurges > 0) {
+      console.log(`Recovered ${restoredPurges} nomination purge timer(s).`);
+    }
+
   } catch (error) {
     console.error("Failed to synchronize slash commands:", error);
   }
@@ -572,14 +571,13 @@ client.on("interactionCreate", async (interaction) => {
 
     for (const name of added) {
       await interaction.channel.send(`Nomination added - ${name}`);
+    }
 
-        if (added.length > 0) {
-          const startedAt = getQueueStartedAt(guildId);
-          const elapsed = startedAt ? Date.now() - new Date(startedAt).getTime() : 0;
-          const remaining = Math.max(NOMINATION_EXPIRY_MS - elapsed, 0);
-          scheduleNominationPurge(guildId, remaining);
-        }
-
+    if (added.length > 0) {
+      const startedAt = getQueueStartedAt(guildId);
+      const elapsed = startedAt ? Date.now() - new Date(startedAt).getTime() : 0;
+      const remaining = Math.max(NOMINATION_EXPIRY_MS - elapsed, 0);
+      scheduleNominationPurge(guildId, remaining);
     }
     return;
   }
@@ -885,7 +883,7 @@ client.on("interactionCreate", async (interaction) => {
       const queuedNominations = getQueuedCutNominations(guildId);
       if (queuedNominations.length === 0) {
         await interaction.reply({
-          content: "No nominations queued. Use /cut nominate first.",
+          content: "No nominations queued. Use /nominate first.",
           ephemeral: true
         });
         return;
@@ -942,7 +940,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     await interaction.reply({
-      content: "Use /cut nominate, /cut why, /cut vote, or /cut end.",
+      content: "Use /nominate, /cut why, /cut vote, or /cut end.",
       ephemeral: true
     });
     return;

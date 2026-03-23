@@ -271,14 +271,13 @@ function getLastCutPollResult(guildId) {
   return store.cutPolls[guildId].lastResult || null;
 }
 
-module.exports = {
-  function getQueueStartedAt(guildId) {
-    const store = readStore();
-    ensureGuildCutState(store, guildId);
-    return store.cutPolls[guildId].nominationQueueStartedAt || null;
-  }
+function getQueueStartedAt(guildId) {
+  const store = readStore();
+  ensureGuildCutState(store, guildId);
+  return store.cutPolls[guildId].nominationQueueStartedAt || null;
+}
 
-  module.exports = {
+module.exports = {
   isValidCommandName,
   upsertCommand,
   getCommand,
