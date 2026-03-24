@@ -11,7 +11,7 @@ function ensureDataFile() {
   }
 
   if (!fs.existsSync(DATA_FILE)) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({ commands: {} }, null, 2), "utf8");
+    fs.writeFileSync(DATA_FILE, JSON.stringify({ cutPolls: {} }, null, 2), "utf8");
   }
 }
 
@@ -22,29 +22,23 @@ function readStore() {
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") {
-      return { commands: {}, cutPolls: {} };
-    }
-
-    if (!parsed.commands || typeof parsed.commands !== "object") {
-      parsed.commands = {};
+      return { cutPolls: {} };
     }
 
     if (!parsed.cutPolls || typeof parsed.cutPolls !== "object") {
       parsed.cutPolls = {};
     }
 
-    return parsed;
+    return {
+      cutPolls: parsed.cutPolls
+    };
   } catch {
-    return { commands: {}, cutPolls: {} };
+    return { cutPolls: {} };
   }
 }
 
 function writeStore(data) {
   fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf8");
-}
-
-function normalizeCommandName(name) {
-  return name.trim().toLowerCase();
 }
 
 function normalizePersonName(name) {
@@ -76,49 +70,6 @@ function ensureGuildCutState(store, guildId) {
   if (typeof store.cutPolls[guildId].lastResult === "undefined") {
     store.cutPolls[guildId].lastResult = null;
   }
-}
-
-function isValidCommandName(name) {
-  return /^[a-z0-9_-]{2,32}$/i.test(name);
-}
-
-function upsertCommand(name, content, authorId, attachmentUrls = []) {
-  const store = readStore();
-  const key = normalizeCommandName(name);
-
-  store.commands[key] = {
-    content,
-    attachments: attachmentUrls || [],
-    authorId,
-    updatedAt: new Date().toISOString()
-  };
-
-  writeStore(store);
-  return key;
-}
-
-function getCommand(name) {
-  const store = readStore();
-  const key = normalizeCommandName(name);
-  return store.commands[key] || null;
-}
-
-function deleteCommand(name) {
-  const store = readStore();
-  const key = normalizeCommandName(name);
-
-  if (!store.commands[key]) {
-    return false;
-  }
-
-  delete store.commands[key];
-  writeStore(store);
-  return true;
-}
-
-function listCommands() {
-  const store = readStore();
-  return Object.keys(store.commands).sort();
 }
 
 function upsertCutNomination(guildId, personName, reason, nominatedBy) {
@@ -278,11 +229,6 @@ function getQueueStartedAt(guildId) {
 }
 
 module.exports = {
-  isValidCommandName,
-  upsertCommand,
-  getCommand,
-  deleteCommand,
-  listCommands,
   upsertCutNomination,
   getQueuedCutNominations,
   clearQueuedCutNominations,

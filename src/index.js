@@ -11,11 +11,6 @@ const {
   TextInputStyle
 } = require("discord.js");
 const {
-  isValidCommandName,
-  upsertCommand,
-  getCommand,
-  deleteCommand,
-  listCommands,
   upsertCutNomination,
   getQueuedCutNominations,
   clearQueuedCutNominations,
@@ -30,19 +25,12 @@ const {
   getLastCutPollResult,
   normalizePersonName
 } = require("./store");
-const { RESERVED_COMMANDS, buildGuildCommands } = require("./command-definitions");
+const { BASE_COMMANDS } = require("./command-definitions");
 
 const CUT_POLL_DURATION_MS = 5 * 60 * 1000;
 const CUT_VOTE_CUSTOM_ID_PREFIX = "cutvote:";
 const NOMINATION_EXPIRY_MS = 2 * 60 * 60 * 1000;
 const nominationPurgeTimers = new Map();
-const POST_DRAFT_MODAL_PREFIX = "postdraft:";
-const POST_DRAFT_TEXT_PREFIX = "postdrafttext:";
-const POST_DRAFT_SAVE_PREFIX = "postdraftsave:";
-const POST_DRAFT_EDIT_PREFIX = "postdraftedit:";
-const POST_DRAFT_EMOJI_PREFIX = "postdraftemoji:";
-const POST_DRAFT_IMG_PREFIX = "postdraftimg:";
-const postDrafts = new Map();
 
 const cutPollChannelIds = (process.env.CUT_POLL_CHANNEL_ID || "")
   .split(",")
@@ -82,7 +70,7 @@ if (configuredGuildIds.length === 0) {
 }
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+  intents: [GatewayIntentBits.Guilds]
 });
 
 function hasManageGuildPermission(interaction) {
@@ -137,10 +125,6 @@ function canUseBot(interaction) {
   return hasAllowedRole(interaction);
 }
 
-function canManagePosts(interaction) {
-  return hasManageGuildPermission(interaction) || isBotAdmin(interaction.user.id);
-}
-
 function scheduleNominationPurge(guildId, delayMs) {
   const existing = nominationPurgeTimers.get(guildId);
   if (existing) clearTimeout(existing);
@@ -179,90 +163,8 @@ function getCutPollChannelWarning() {
   return `Cut poll commands can only be used in ${mentions}.`;
 }
 
-function buildPostDraftKey(userId, commandName) {
-  return `${userId}:${commandName.toLowerCase()}`;
-}
-
-function buildPostModal(commandName, initialValue = "") {
-  const modal = new ModalBuilder()
-    .setCustomId(`${POST_DRAFT_MODAL_PREFIX}${commandName}`)
-    .setTitle(`Edit post: ${commandName}`);
-
-  const informationInput = new TextInputBuilder()
-    .setCustomId("information")
-    .setLabel("Post text")
-    .setStyle(TextInputStyle.Paragraph)
-    .setPlaceholder("Type the post content here. Line breaks are supported.")
-    .setRequired(false)
-    .setMaxLength(1900)
-    .setValue(initialValue.slice(0, 1900));
-
-  modal.addComponents(new ActionRowBuilder().addComponents(informationInput));
-  return modal;
-}
-
-function buildPostDraftPreview(commandName, draft) {
-  const text = draft.content && draft.content.trim() ? draft.content : "(No text yet)";
-  const emojiLine = draft.emojis && draft.emojis.length > 0
-    ? draft.emojis.join(" ")
-    : "(No emojis yet)";
-  const imagesLine = draft.images && draft.images.length > 0
-    ? draft.images.join("\n")
-    : "(No images yet)";
-
-  return [
-    `Preview for !${commandName}:`,
-    "",
-    "Text:",
-    text,
-    "",
-    "Emojis:",
-    emojiLine,
-    "",
-    "Images:",
-    imagesLine,
-    "",
-    "Use Text, Emoji, and Image to build the post, then Save to publish."
-  ].join("\n");
-}
-
-function buildPostDraftButtons(commandName) {
-  return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`${POST_DRAFT_TEXT_PREFIX}${commandName}`)
-        .setLabel("Text")
-        .setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder()
-        .setCustomId(`${POST_DRAFT_EMOJI_PREFIX}${commandName}`)
-        .setLabel("Emoji")
-        .setStyle(ButtonStyle.Primary)
-        .setEmoji("😀"),
-      new ButtonBuilder()
-        .setCustomId(`${POST_DRAFT_IMG_PREFIX}${commandName}`)
-        .setLabel("Image")
-        .setStyle(ButtonStyle.Primary)
-        .setEmoji("➕")
-    ),
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`${POST_DRAFT_SAVE_PREFIX}${commandName}`)
-        .setLabel("Save")
-        .setStyle(ButtonStyle.Success)
-    )
-  ];
-}
-
-async function sendPostDraftPreview(user, commandName, draft) {
-  await user.send({
-    content: buildPostDraftPreview(commandName, draft),
-    components: buildPostDraftButtons(commandName)
-  });
-}
-
 async function syncGuildCommands(guild) {
-  const commands = buildGuildCommands(listCommands());
-  await guild.commands.set(commands);
+  await guild.commands.set(BASE_COMMANDS);
 }
 
 async function syncConfiguredGuilds() {
@@ -563,150 +465,6 @@ client.once("ready", async () => {
 });
 
 client.on("interactionCreate", async (interaction) => {
-  if (
-    interaction.isButton() &&
-    (interaction.customId.startsWith(POST_DRAFT_TEXT_PREFIX) ||
-      interaction.customId.startsWith(POST_DRAFT_EMOJI_PREFIX) ||
-      interaction.customId.startsWith(POST_DRAFT_IMG_PREFIX))
-  ) {
-    if (isBotBanned(interaction.user.id)) {
-      await interaction.reply({ content: "You are not allowed to use this bot.", ephemeral: true });
-      return;
-    }
-
-    const isText = interaction.customId.startsWith(POST_DRAFT_TEXT_PREFIX);
-    const isEmoji = interaction.customId.startsWith(POST_DRAFT_EMOJI_PREFIX);
-    const commandName = interaction.customId
-      .replace(POST_DRAFT_TEXT_PREFIX, "")
-      .replace(POST_DRAFT_EMOJI_PREFIX, "")
-      .replace(POST_DRAFT_IMG_PREFIX, "");
-
-    const draftKey = buildPostDraftKey(interaction.user.id, commandName);
-    const draft = postDrafts.get(draftKey);
-    if (!draft) {
-      await interaction.reply({ content: "This draft has expired. Run /setpost again.", ephemeral: true });
-      return;
-    }
-
-    if (isText) {
-      await interaction.showModal(buildPostModal(commandName, draft.content || ""));
-      return;
-    }
-
-    if (isEmoji) {
-      const modal = new ModalBuilder()
-        .setCustomId(`postemoji:${commandName}`)
-        .setTitle("Add Emoji");
-
-      const emojiInput = new TextInputBuilder()
-        .setCustomId("emoji")
-        .setLabel("Emoji or emoji text")
-        .setStyle(TextInputStyle.Short)
-        .setPlaceholder("😀 or fire emoji or :fire:")
-        .setRequired(true)
-        .setMaxLength(100);
-
-      modal.addComponents(new ActionRowBuilder().addComponents(emojiInput));
-      await interaction.showModal(modal);
-      return;
-    }
-
-    await interaction.reply({
-      content: "Upload image(s) in this DM. I'll collect them for the next 60 seconds.",
-      ephemeral: false
-    });
-
-    const userId = interaction.user.id;
-    const dms = interaction.user.dmChannel || await interaction.user.createDM();
-
-    const messageFilter = (msg) => {
-      return msg.author.id === userId && msg.attachments.size > 0;
-    };
-
-    try {
-      const collected = await dms.awaitMessages({
-        filter: messageFilter,
-        max: 5,
-        time: 60000,
-        errors: ["time"]
-      });
-
-      if (collected.size > 0) {
-        collected.forEach((msg) => {
-          msg.attachments.forEach((att) => {
-            draft.images.push(att.url);
-          });
-        });
-        draft.updatedAt = Date.now();
-
-        await sendPostDraftPreview(interaction.user, commandName, draft);
-
-        await interaction.followUp({
-          content: `✓ Added ${draft.images.length} image(s) to your post draft.`,
-          ephemeral: false
-        });
-      }
-    } catch (error) {
-      await interaction.followUp({
-        content: "Timed out waiting for images. You can try adding them again.",
-        ephemeral: false
-      });
-    }
-    return;
-  }
-
-  if (
-    interaction.isButton() &&
-    (interaction.customId.startsWith(POST_DRAFT_SAVE_PREFIX) ||
-      interaction.customId.startsWith(POST_DRAFT_EDIT_PREFIX))
-  ) {
-    if (isBotBanned(interaction.user.id)) {
-      await interaction.reply({ content: "You are not allowed to use this bot.", ephemeral: true });
-      return;
-    }
-
-    const isSave = interaction.customId.startsWith(POST_DRAFT_SAVE_PREFIX);
-    const commandName = interaction.customId
-      .replace(POST_DRAFT_SAVE_PREFIX, "")
-      .replace(POST_DRAFT_EDIT_PREFIX, "");
-
-    if (!isValidCommandName(commandName)) {
-      await interaction.reply({ content: "This draft is invalid or expired.", ephemeral: true });
-      return;
-    }
-
-    const draftKey = buildPostDraftKey(interaction.user.id, commandName);
-    const draft = postDrafts.get(draftKey);
-    if (!draft) {
-      await interaction.reply({ content: "This draft has expired. Run /setpost again.", ephemeral: true });
-      return;
-    }
-
-    if (isSave) {
-      let finalContent = draft.content || "";
-      if (draft.emojis && draft.emojis.length > 0) {
-        finalContent = finalContent
-          ? `${finalContent}\n\n${draft.emojis.join(" ")}`
-          : draft.emojis.join(" ");
-      }
-      const savedKey = upsertCommand(commandName, finalContent, interaction.user.id, draft.images);
-      postDrafts.delete(draftKey);
-      await syncConfiguredGuilds();
-      await interaction.update({
-        content: `${buildPostDraftPreview(savedKey, {
-          content: draft.content || "",
-          emojis: draft.emojis || [],
-          images: draft.images || []
-        })}\n\nSaved. Call it with !${savedKey}.`,
-        components: []
-      });
-      return;
-    }
-
-    await interaction.showModal(buildPostModal(commandName, draft.content));
-    return;
-  }
-
   if (interaction.isButton() && interaction.customId.startsWith(CUT_VOTE_CUSTOM_ID_PREFIX)) {
     if (!canUseBot(interaction)) {
       await interaction.reply({
@@ -842,87 +600,6 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
 
-  if (interaction.isModalSubmit() && interaction.customId.startsWith("postemoji:")) {
-    const commandName = interaction.customId.replace("postemoji:", "").trim();
-    const emojiValue = interaction.fields.getTextInputValue("emoji").trim();
-    const draftKey = buildPostDraftKey(interaction.user.id, commandName);
-    const draft = postDrafts.get(draftKey);
-
-    if (!draft) {
-      await interaction.reply({ content: "This draft has expired. Run /setpost again.", ephemeral: true });
-      return;
-    }
-
-    if (!emojiValue) {
-      await interaction.reply({ content: "No emoji text was entered.", ephemeral: true });
-      return;
-    }
-
-    draft.emojis.push(emojiValue);
-    draft.updatedAt = Date.now();
-
-    try {
-      await sendPostDraftPreview(interaction.user, commandName, draft);
-    } catch {
-      await interaction.reply({
-        content: "I could not refresh the DM preview, but the emoji was added to the draft.",
-        ephemeral: true
-      });
-      return;
-    }
-
-    await interaction.reply({
-      content: `Added emoji to /${commandName}. Check your DMs for the updated preview.`,
-      ephemeral: true
-    });
-    return;
-  }
-
-  if (interaction.isModalSubmit() && interaction.customId.startsWith(POST_DRAFT_MODAL_PREFIX)) {
-    const commandName = interaction.customId.replace(POST_DRAFT_MODAL_PREFIX, "").trim();
-    const info = interaction.fields.getTextInputValue("information").trim();
-
-    if (!isValidCommandName(commandName)) {
-      await interaction.reply({
-        content: "Invalid command name. Use 2-32 chars: letters, numbers, underscore, or hyphen.",
-        ephemeral: true
-      });
-      return;
-    }
-
-    if (RESERVED_COMMANDS.has(commandName.toLowerCase())) {
-      await interaction.reply({
-        content: "That command name is reserved. Please choose a different name.",
-        ephemeral: true
-      });
-      return;
-    }
-
-    const draftKey = buildPostDraftKey(interaction.user.id, commandName);
-    const existingDraft = postDrafts.get(draftKey);
-    postDrafts.set(draftKey, {
-      commandName,
-      content: info,
-      emojis: existingDraft && Array.isArray(existingDraft.emojis) ? existingDraft.emojis : [],
-      images: existingDraft && Array.isArray(existingDraft.images) ? existingDraft.images : [],
-      updatedAt: Date.now()
-    });
-
-    try {
-      await sendPostDraftPreview(interaction.user, commandName, postDrafts.get(draftKey));
-      await interaction.reply({
-        content: "Check your DMs for the post editor.",
-        ephemeral: true
-      });
-    } catch {
-      await interaction.reply({
-        content: "I could not DM you. Enable DMs from server members, then try /setpost again.",
-        ephemeral: true
-      });
-    }
-    return;
-  }
-
   if (!interaction.isChatInputCommand()) {
     return;
   }
@@ -936,134 +613,6 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   const commandName = interaction.commandName;
-
-  if (commandName === "setpost") {
-    const keyInput = interaction.options.getString("command", true);
-
-    if (!canManagePosts(interaction)) {
-      await interaction.reply({
-        content: "You need Manage Server permission or BOT_ADMIN_USER_IDS access to create or update posts.",
-        ephemeral: true
-      });
-      return;
-    }
-
-    if (!isValidCommandName(keyInput)) {
-      await interaction.reply({
-        content:
-          "Invalid command name. Use 2-32 chars: letters, numbers, underscore, or hyphen.",
-        ephemeral: true
-      });
-      return;
-    }
-
-    if (RESERVED_COMMANDS.has(keyInput.toLowerCase())) {
-      await interaction.reply({
-        content: "That command name is reserved. Please choose a different name.",
-        ephemeral: true
-      });
-      return;
-    }
-
-    const existing = getCommand(keyInput);
-    const draftKey = buildPostDraftKey(interaction.user.id, keyInput);
-    const draft = {
-      commandName: keyInput,
-      content: existing && typeof existing.content === "string" ? existing.content : "",
-      emojis: [],
-      images: existing && Array.isArray(existing.attachments) ? [...existing.attachments] : [],
-      updatedAt: Date.now()
-    };
-    postDrafts.set(draftKey, draft);
-
-    try {
-      await sendPostDraftPreview(interaction.user, keyInput, draft);
-      await interaction.reply({
-        content: "Check your DMs for the post editor.",
-        ephemeral: true
-      });
-    } catch {
-      await interaction.reply({
-        content: "I could not DM you. Enable DMs from server members, then try /setpost again.",
-        ephemeral: true
-      });
-    }
-    return;
-  }
-
-  if (commandName === "post") {
-    const keyInput = interaction.options.getString("command", true);
-    const post = getCommand(keyInput);
-
-    if (!post) {
-      await interaction.reply({
-        content: "No post found for that command name.",
-        ephemeral: true
-      });
-      return;
-    }
-
-    let finalContent = post.content || "(No text content)";
-
-    if (post.attachments && post.attachments.length > 0) {
-      finalContent += "\n\n" + post.attachments.join("\n");
-    }
-
-    await interaction.reply({ content: finalContent });
-    return;
-  }
-
-  if (commandName === "deletepost") {
-    const keyInput = interaction.options.getString("command", true);
-
-    if (!canManagePosts(interaction)) {
-      await interaction.reply({
-        content: "You need Manage Server permission or BOT_ADMIN_USER_IDS access to delete posts.",
-        ephemeral: true
-      });
-      return;
-    }
-
-    const deleted = deleteCommand(keyInput);
-    if (deleted) {
-      await syncConfiguredGuilds();
-    }
-    await interaction.reply({
-      content: deleted
-        ? "Post deleted."
-        : "No post found for that command name.",
-      ephemeral: true
-    });
-    return;
-  }
-
-  if (commandName === "list") {
-    const subcommand = interaction.options.getSubcommand();
-
-    if (subcommand !== "post") {
-      await interaction.reply({
-        content: "Use /list post to view saved post command names.",
-        ephemeral: true
-      });
-      return;
-    }
-
-    const commands = listCommands();
-
-    if (commands.length === 0) {
-      await interaction.reply({
-        content: "No posts saved yet.",
-        ephemeral: true
-      });
-      return;
-    }
-
-    await interaction.reply({
-      content: `Available command names: ${commands.map((name) => `/${name}`).join(", ")}`,
-      ephemeral: true
-    });
-    return;
-  }
 
   if (commandName === "nominate") {
     if (!isCutPollChannel(interaction.channelId)) {
@@ -1249,128 +798,16 @@ client.on("interactionCreate", async (interaction) => {
     await interaction.reply({
       content: [
         "SneakyBot Commands:",
-        "- /setpost command:<name> -> open the DM post editor with Text, Emoji, Image, and Save",
-        "- /<name> -> show the saved post for that command",
-        "- /post command:<name> -> show saved post by command name",
-        "- /list post -> list all saved post command names",
-        "- /deletepost command:<name> -> delete a saved post",
         "- /nominate -> open modal to nominate one or more people (one name per line)",
         "- /cut why person:<name> -> show that person's stored reason (ephemeral)",
         "- /cut vote -> start a 5 minute button poll using queued nominations",
         "- /cut end -> end the active cut poll and post results",
-        "- /cuts -> repost the last completed cut poll results",
-        "- !set <name> <info> -> save/update from message command",
-        "- !<name> -> show the saved post from message command"
+        "- /cuts -> repost the last completed cut poll results"
       ].join("\n"),
       ephemeral: true
     });
     return;
   }
-
-  const dynamicPost = getCommand(commandName);
-  if (dynamicPost) {
-    let finalContent = dynamicPost.content || "(No text content)";
-
-    if (dynamicPost.attachments && dynamicPost.attachments.length > 0) {
-      finalContent += "\n\n" + dynamicPost.attachments.join("\n");
-    }
-
-    await interaction.reply({
-      content: finalContent
-    });
-  }
-});
-
-client.on("messageCreate", async (message) => {
-  if (!message.guild || message.author.bot) {
-    return;
-  }
-
-  if (isBotBanned(message.author.id)) {
-    return;
-  }
-
-  const raw = message.content.trim();
-  if (!raw.startsWith("!")) {
-    return;
-  }
-
-  if (accessControlEnabled) {
-    const hasManage = Boolean(
-      message.member && message.member.permissions
-        && message.member.permissions.has(PermissionsBitField.Flags.ManageGuild)
-    );
-    const hasAllowedUser = allowedUserIds.includes(message.author.id);
-    const hasAllowed = hasManage || hasAllowedUser || hasAllowedRole({ member: message.member });
-
-    if (!hasAllowed && !isBotAdmin(message.author.id)) {
-      return;
-    }
-  }
-
-  const setMatch = raw.match(/^!set\s+(\S+)\s+([\s\S]+)$/i);
-
-  if (setMatch) {
-    const canManageFromMessage = Boolean(
-      message.member && message.member.permissions
-        && message.member.permissions.has(PermissionsBitField.Flags.ManageGuild)
-    ) || isBotAdmin(message.author.id);
-
-    if (!canManageFromMessage) {
-      await message.reply(
-        "You need Manage Server permission or BOT_ADMIN_USER_IDS access to create or update posts."
-      );
-      return;
-    }
-
-    const keyInput = setMatch[1].trim();
-    const info = setMatch[2].trim();
-
-    if (!isValidCommandName(keyInput)) {
-      await message.reply("Invalid command name. Use 2-32 chars: letters, numbers, underscore, or hyphen.");
-      return;
-    }
-
-    if (RESERVED_COMMANDS.has(keyInput.toLowerCase())) {
-      await message.reply("That command name is reserved. Please choose a different name.");
-      return;
-    }
-
-    const attachmentUrls = message.attachments.map((att) => att.url);
-    const savedKey = upsertCommand(keyInput, info, message.author.id, attachmentUrls);
-    await syncConfiguredGuilds();
-
-    const attachmentText = attachmentUrls.length > 0
-      ? ` with ${attachmentUrls.length} attachment(s)`
-      : "";
-    await message.reply(`Saved !${savedKey}${attachmentText}. You can also use /${savedKey}.`);
-    return;
-  }
-
-  if (/^!set\b/i.test(raw)) {
-    await message.reply("Usage: !set <command> <info>. Example: !set BlameMibs This has to be all Mibs fault");
-    return;
-  }
-
-  const keyInput = raw.slice(1).trim();
-  if (!keyInput || keyInput.includes(" ")) {
-    return;
-  }
-
-  const post = getCommand(keyInput);
-  if (!post) {
-    return;
-  }
-
-  let finalContent = post.content || "(No text content)";
-
-  if (post.attachments && post.attachments.length > 0) {
-    finalContent += "\n\n" + post.attachments.join("\n");
-  }
-
-  await message.channel.send({
-    content: finalContent
-  });
 });
 
 client.login(token);

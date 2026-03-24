@@ -1,17 +1,3 @@
 {
-  "commands": {
-    "blamemibs": {
-      "content": "This has to be all Mibs fault",
-      "attachments": [],
-      "authorId": "211240022651830272",
-      "updatedAt": "2026-03-18T18:05:41.639Z"
-    },
-    "hibot": {
-      "content": "Hi I'm SneakyBot",
-      "attachments": [],
-      "authorId": "211240022651830272",
-      "updatedAt": "2026-03-18T18:17:25.951Z"
-    }
-  },
   "cutPolls": {}
 }

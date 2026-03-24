@@ -1,20 +1,17 @@
-# SneakyBot Discord Info Bot
+# SneakyBot Discord Cut Poll Bot
 
-This bot lets your group save information under command names and pull it later with slash commands.
+This bot manages cut nominations and voting polls with Discord slash commands.
 
 ## Features
 
-- Save or update a post: `/setpost`
-- Get a saved post: `/<your-command>`
-- Legacy lookup still available: `/post`
-- List all saved command names: `/list post`
-- Show command help: `/sneakybot help`
-- Delete a saved post: `/deletepost`
-- Prefix set command: `!set BlameMibs This has to be all Mibs fault`
-- Prefix get command: `!BlameMibs`
+- Open the nomination modal with `/nominate`
+- Start a poll from queued nominations with `/cut vote`
+- End an active poll with `/cut end`
+- Look up a nominee reason with `/cut why`
+- Repost the most recent results with `/cuts`
+- Show command help with `/sneakybot help`
 
-By default, anyone in your server can use commands.
-Only users with **Manage Server** permission can use `/setpost` and `/deletepost`.
+By default, anyone in your server can use commands unless access restrictions are configured.
 
 ## 1) Create the Discord application and bot
 
@@ -22,7 +19,7 @@ Only users with **Manage Server** permission can use `/setpost` and `/deletepost
 2. Create a New Application.
 3. Open the **Bot** section and create a bot user.
 4. Copy the bot token.
-5. In **Bot > Privileged Gateway Intents**, enable **Message Content Intent** (required for `!` commands).
+5. In **Bot > Privileged Gateway Intents**, no extra intents are required for the current slash-command-only bot.
 6. In **OAuth2 > URL Generator**:
    - Scopes: `bot`, `applications.commands`
    - Bot Permissions: `Send Messages`, `Use Slash Commands`
@@ -59,23 +56,23 @@ npm start
 
 ## Usage examples
 
-- Save a post:
-  - `/setpost command:rules`
-  - A modal opens with a large multiline "Information" box
-- Retrieve it:
-  - `/rules`
-  - or `/post command:rules`
-- List available command names:
-  - `/list post`
+- Add nominees:
+  - `/nominate`
+  - Enter one name per line in the modal
+- Start the poll:
+  - `/cut vote`
+- End the poll early:
+  - `/cut end`
+- Check a reason for a nominee:
+  - `/cut why person:<name>`
+- Repost the last result:
+  - `/cuts`
 - Show all bot command usage:
   - `/sneakybot help`
-- Prefix set/get examples:
-  - `!set BlameMibs This has to be all Mibs fault`
-  - `!BlameMibs`
 
 ## Data storage
 
-Posts are stored in `data/posts.json`.
+Cut poll state is stored in `data/posts.json`.
 
 ## Legal
 

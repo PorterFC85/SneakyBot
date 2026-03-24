@@ -1,7 +1,6 @@
 require("dotenv").config({ quiet: true });
 const { Client, GatewayIntentBits } = require("discord.js");
-const { listCommands } = require("./store");
-const { buildGuildCommands } = require("./command-definitions");
+const { BASE_COMMANDS } = require("./command-definitions");
 
 const token = process.env.DISCORD_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
@@ -16,7 +15,7 @@ if (!token || !clientId || guildIds.length === 0) {
   process.exit(1);
 }
 
-const commands = buildGuildCommands(listCommands());
+const commands = BASE_COMMANDS;
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 

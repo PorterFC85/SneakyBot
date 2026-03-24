@@ -14,10 +14,9 @@ Contact: [Your Email or Discord Contact]
 
 SneakyBot allows users in a Discord server to:
 
-- save information under a command name using `/setpost`
-- retrieve saved information using `/post`
-- list saved command names using `/listposts`
-- delete saved information using `/deletepost`
+- submit nominees using `/nominate`
+- start or end cut polls using `/cut`
+- repost the most recent cut poll result using `/cuts`
 
 Certain commands may require Discord permissions (for example, Manage Server) based on bot configuration.
 
@@ -34,7 +33,7 @@ The Bot Owner may restrict or block access at any time to protect the server and
 
 ## 4. User Content
 
-You are responsible for any text or content you submit to the Bot.
+You are responsible for any names, reasons, or other content you submit to the Bot.
 
 You confirm you have the right to share that content and that sharing it through the Bot does not infringe third-party rights.
 

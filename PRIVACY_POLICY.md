@@ -14,10 +14,11 @@ Contact: [Your Email or Discord Contact]
 
 Based on current bot features, the Bot may process and store:
 
-- command name submitted by users (example: `rules`)
-- information text submitted with `/setpost`
-- Discord user ID of the person who last updated a saved post
-- timestamp of when a saved post was updated
+- nominee names submitted through `/nominate`
+- optional nomination reasons used by cut poll commands
+- Discord user IDs associated with nominations and votes
+- timestamps related to nomination queues and poll results
+- Discord channel/message IDs needed to manage active polls
 
 This data is stored locally in `data/posts.json` on the host machine running the Bot.
 
@@ -25,8 +26,8 @@ This data is stored locally in `data/posts.json` on the host machine running the
 
 Information is used only to:
 
-- save and retrieve posts tied to command names
-- allow command management (update/delete)
+- run nomination queues and cut polls
+- record votes and publish poll results
 - support basic administration and troubleshooting
 
 ## 4. Legal Basis (Where Applicable)
@@ -45,9 +46,9 @@ Data is not shared with third parties except:
 
 ## 6. Data Retention
 
-Stored posts remain until one of the following happens:
+Stored cut poll data remains until one of the following happens:
 
-- removed via `/deletepost`
+- overwritten by newer poll activity
 - manually removed by the Bot Owner
 - Bot data is reset or the Bot is discontinued
 
