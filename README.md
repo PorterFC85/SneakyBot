@@ -7,7 +7,6 @@ This bot manages cut nominations and voting polls with Discord slash commands.
 - Open the nomination modal with `/nominate`
 - Start a poll from queued nominations with `/cut vote`
 - End an active poll with `/cut end`
-- Look up a nominee reason with `/cut why`
 - Repost the most recent results with `/cuts`
 - Show command help with `/sneakybot help`
 
@@ -63,8 +62,6 @@ npm start
   - `/cut vote`
 - End the poll early:
   - `/cut end`
-- Check a reason for a nominee:
-  - `/cut why person:<name>`
 - Repost the last result:
   - `/cuts`
 - Show all bot command usage:

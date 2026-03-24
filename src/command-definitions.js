@@ -20,19 +20,6 @@ const BASE_COMMANDS = [
     description: "Manage cut nominations and voting polls",
     options: [
       {
-        name: "why",
-        description: "Show the reason for a nominated person",
-        type: 1,
-        options: [
-          {
-            name: "person",
-            description: "Person name to look up",
-            type: 3,
-            required: true
-          }
-        ]
-      },
-      {
         name: "vote",
         description: "Start the poll using queued nominations",
         type: 1,

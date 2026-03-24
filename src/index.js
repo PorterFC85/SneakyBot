@@ -15,7 +15,6 @@ const {
   getQueuedCutNominations,
   clearQueuedCutNominations,
   getQueueStartedAt,
-  findCutReason,
   startCutPoll,
   getActiveCutPoll,
   clearActiveCutPoll,
@@ -658,25 +657,6 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    if (subcommand === "why") {
-      const person = interaction.options.getString("person", true);
-      const nomination = findCutReason(guildId, person);
-
-      if (!nomination) {
-        await interaction.reply({
-          content: "No nomination found for that person.",
-          ephemeral: true
-        });
-        return;
-      }
-
-      await interaction.reply({
-        content: `Reason for ${nomination.name}: ${nomination.reason}`,
-        ephemeral: true
-      });
-      return;
-    }
-
     if (subcommand === "vote") {
       const existingPoll = getActiveCutPoll(guildId);
       if (existingPoll) {
@@ -747,7 +727,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     await interaction.reply({
-      content: "Use /nominate, /cut why, /cut vote, or /cut end.",
+      content: "Use /nominate, /cut vote, or /cut end.",
       ephemeral: true
     });
     return;
@@ -799,7 +779,6 @@ client.on("interactionCreate", async (interaction) => {
       content: [
         "SneakyBot Commands:",
         "- /nominate -> open modal to nominate one or more people (one name per line)",
-        "- /cut why person:<name> -> show that person's stored reason (ephemeral)",
         "- /cut vote -> start a 5 minute button poll using queued nominations",
         "- /cut end -> end the active cut poll and post results",
         "- /cuts -> repost the last completed cut poll results"

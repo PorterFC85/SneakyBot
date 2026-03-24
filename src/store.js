@@ -115,28 +115,6 @@ function clearQueuedCutNominations(guildId) {
   writeStore(store);
 }
 
-function findCutReason(guildId, personName) {
-  const store = readStore();
-  ensureGuildCutState(store, guildId);
-
-  const normalizedName = normalizePersonName(personName);
-  const guildState = store.cutPolls[guildId];
-
-  const queuedEntry = guildState.queuedNominations.find(
-    (entry) => entry.normalizedName === normalizedName
-  );
-  if (queuedEntry) {
-    return queuedEntry;
-  }
-
-  const activeEntries =
-    guildState.activePoll && Array.isArray(guildState.activePoll.entries)
-      ? guildState.activePoll.entries
-      : [];
-
-  return activeEntries.find((entry) => entry.normalizedName === normalizedName) || null;
-}
-
 function startCutPoll(guildId, activePoll) {
   const store = readStore();
   ensureGuildCutState(store, guildId);
@@ -233,7 +211,6 @@ module.exports = {
   getQueuedCutNominations,
   clearQueuedCutNominations,
   getQueueStartedAt,
-  findCutReason,
   startCutPoll,
   getActiveCutPoll,
   setActiveCutPoll,
