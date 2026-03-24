@@ -2,6 +2,7 @@ require("dotenv").config({ quiet: true });
 const {
   Client,
   GatewayIntentBits,
+  Partials,
   PermissionsBitField,
   ActionRowBuilder,
   ButtonBuilder,
@@ -34,7 +35,6 @@ const { BASE_COMMANDS, RESERVED_COMMANDS } = require("./command-definitions");
 const CUT_POLL_DURATION_MS = 5 * 60 * 1000;
 const CUT_VOTE_CUSTOM_ID_PREFIX = "cutvote:";
 const NOMINATION_EXPIRY_MS = 2 * 60 * 60 * 1000;
-const SET_POST_MODAL_PREFIX = "setpost:";
 const POST_EDIT_PREFIX = "postedit:";
 const POST_EDIT_CANCEL_PREFIX = "posteditcancel:";
 const POST_CONFIRM_PREFIX = "postconfirm:";
@@ -81,7 +81,13 @@ if (configuredGuildIds.length === 0) {
 }
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.DirectMessages
+  ],
+  partials: [Partials.Channel]
 });
 
 function hasManageGuildPermission(interaction) {
@@ -214,24 +220,6 @@ function getCutPollChannelWarning() {
 
 function buildPendingPostKey(userId, commandName) {
   return `${userId}:${commandName.toLowerCase()}`;
-}
-
-function buildPostModal(commandName, initialValue = "") {
-  const modal = new ModalBuilder()
-    .setCustomId(`${SET_POST_MODAL_PREFIX}${commandName}`)
-    .setTitle(`Set post: ${commandName}`);
-
-  const contentInput = new TextInputBuilder()
-    .setCustomId("content")
-    .setLabel("Post content")
-    .setStyle(TextInputStyle.Paragraph)
-    .setPlaceholder("Paste the text you want !command to post.")
-    .setRequired(true)
-    .setMaxLength(1900)
-    .setValue(initialValue.slice(0, 1900));
-
-  modal.addComponents(new ActionRowBuilder().addComponents(contentInput));
-  return modal;
 }
 
 function buildPostEditChoiceRow(pendingKey) {
@@ -373,6 +361,24 @@ async function sendPendingPostEditPrompt(user, commandName, content, pendingKey)
   return user.send({
     content: `!${commandName} already exists. Would you like to edit it?`,
     components: buildPostEditChoiceRow(pendingKey)
+  });
+}
+
+async function sendPostContentPrompt(user, commandName, existingContent = "") {
+  if (existingContent) {
+    await user.send({
+      content: buildSavedPostContent(commandName, existingContent)
+    });
+  }
+
+  await user.send({
+    content: [
+      `Send the new content for !${commandName} in your next DM message.`,
+      "You can include emojis and line breaks.",
+      "Max length is 1900 characters.",
+      "Type `cancel` to stop.",
+      "This request expires in 3 minutes."
+    ].join("\n")
   });
 }
 
@@ -725,8 +731,23 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     if (interaction.customId.startsWith(POST_EDIT_PREFIX)) {
-      clearPendingPostAction(pendingKey);
-      await interaction.showModal(buildPostModal(pending.commandName, pending.existingContent || ""));
+      try {
+        const nextPending = {
+          userId: pending.userId,
+          commandName: pending.commandName,
+          existingContent: pending.existingContent || "",
+          mode: "awaiting-dm-content"
+        };
+        clearPendingPostAction(pendingKey);
+        await interaction.update({
+          content: `Send the updated content for !${pending.commandName} in this DM within 3 minutes.`,
+          components: []
+        });
+        setPendingPostAction(pendingKey, nextPending);
+      } catch {
+        clearPendingPostAction(pendingKey);
+        await interaction.reply({ content: "I could not start edit mode. Run /set again.", ephemeral: true });
+      }
       return;
     }
 
@@ -883,82 +904,6 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
 
-  if (interaction.isModalSubmit() && interaction.customId.startsWith(SET_POST_MODAL_PREFIX)) {
-    if (isBotBanned(interaction.user.id)) {
-      await interaction.reply({ content: "You are not allowed to use this bot.", ephemeral: true });
-      return;
-    }
-
-    if (interaction.inGuild() && !canUseBot(interaction)) {
-      await interaction.reply({ content: "You are not allowed to use this bot.", ephemeral: true });
-      return;
-    }
-
-    const commandName = interaction.customId.slice(SET_POST_MODAL_PREFIX.length).trim().toLowerCase();
-    const content = interaction.fields.getTextInputValue("content").trim();
-
-    if (!isValidCommandName(commandName)) {
-      await interaction.reply({
-        content: "Invalid command name. Use 2-32 chars: letters, numbers, underscore, or hyphen.",
-        ephemeral: interaction.inGuild()
-      });
-      return;
-    }
-
-    if (RESERVED_COMMANDS.has(commandName)) {
-      await interaction.reply({
-        content: "That command name is reserved. Choose a different name.",
-        ephemeral: interaction.inGuild()
-      });
-      return;
-    }
-
-    if (!content) {
-      await interaction.reply({
-        content: "Post content cannot be empty.",
-        ephemeral: interaction.inGuild()
-      });
-      return;
-    }
-
-    const pendingKey = buildPendingPostKey(interaction.user.id, commandName);
-    const existing = getCommand(commandName);
-
-    try {
-      const previewMessage = await sendPendingPostPreview(
-        interaction.user,
-        commandName,
-        content,
-        existing ? existing.content : "",
-        pendingKey
-      );
-
-      setPendingPostAction(pendingKey, {
-        userId: interaction.user.id,
-        commandName,
-        content,
-        existingContent: existing ? existing.content : "",
-        channelId: previewMessage.channelId,
-        messageId: previewMessage.id,
-        mode: "awaiting-save-confirm"
-      });
-
-      await interaction.reply({
-        content: interaction.inGuild()
-          ? "Check your DMs for the preview. Confirm or deny within 3 minutes."
-          : "Review the preview above and confirm or deny within 3 minutes.",
-        ephemeral: interaction.inGuild()
-      });
-    } catch {
-      clearPendingPostAction(pendingKey);
-      await interaction.reply({
-        content: "I could not DM you. Enable DMs from server members, then try /set again.",
-        ephemeral: interaction.inGuild()
-      });
-    }
-    return;
-  }
-
   if (!interaction.isChatInputCommand()) {
     return;
   }
@@ -996,8 +941,25 @@ client.on("interactionCreate", async (interaction) => {
     const existing = getCommand(keyInput);
 
     if (!existing) {
-      clearPendingPostAction(pendingKey);
-      await interaction.showModal(buildPostModal(keyInput));
+      try {
+        await sendPostContentPrompt(interaction.user, keyInput);
+        setPendingPostAction(pendingKey, {
+          userId: interaction.user.id,
+          commandName: keyInput,
+          existingContent: "",
+          mode: "awaiting-dm-content"
+        });
+        await interaction.reply({
+          content: "Check your DMs and send the content you want to save within 3 minutes.",
+          ephemeral: true
+        });
+      } catch {
+        clearPendingPostAction(pendingKey);
+        await interaction.reply({
+          content: "I could not DM you. Enable DMs from server members, then try /set again.",
+          ephemeral: true
+        });
+      }
       return;
     }
 
@@ -1240,7 +1202,63 @@ client.on("interactionCreate", async (interaction) => {
 });
 
 client.on("messageCreate", async (message) => {
-  if (!message.guild || message.author.bot) {
+  if (message.author.bot) {
+    return;
+  }
+
+  if (!message.guild) {
+    if (isBotBanned(message.author.id)) {
+      return;
+    }
+
+    const pendingEntry = [...pendingPostActions.entries()]
+      .find(([, pending]) => pending.userId === message.author.id && pending.mode === "awaiting-dm-content");
+
+    if (!pendingEntry) {
+      return;
+    }
+
+    const [pendingKey, pending] = pendingEntry;
+    const content = message.content.trim();
+
+    if (!content) {
+      await message.reply("Post content cannot be empty. Send the text again or type `cancel`.");
+      return;
+    }
+
+    if (content.toLowerCase() === "cancel") {
+      clearPendingPostAction(pendingKey);
+      await message.reply(`Cancelled saving !${pending.commandName}.`);
+      return;
+    }
+
+    if (content.length > 1900) {
+      await message.reply("That message is too long. Keep it to 1900 characters or less.");
+      return;
+    }
+
+    try {
+      const previewMessage = await sendPendingPostPreview(
+        message.author,
+        pending.commandName,
+        content,
+        pending.existingContent || "",
+        pendingKey
+      );
+
+      setPendingPostAction(pendingKey, {
+        userId: pending.userId,
+        commandName: pending.commandName,
+        content,
+        existingContent: pending.existingContent || "",
+        channelId: previewMessage.channelId,
+        messageId: previewMessage.id,
+        mode: "awaiting-save-confirm"
+      });
+    } catch {
+      clearPendingPostAction(pendingKey);
+      await message.reply("I could not send the preview. Run /set again.");
+    }
     return;
   }
 

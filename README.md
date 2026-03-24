@@ -62,7 +62,7 @@ npm start
 
 - Create a new post:
   - `/set command:macros`
-  - Enter the text in the modal
+  - Send the content in DM (emojis and line breaks are supported)
   - Confirm or deny the preview in DM within 3 minutes
 - Edit an existing post:
   - `/set command:macros`
