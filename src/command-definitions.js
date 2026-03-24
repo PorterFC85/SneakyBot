@@ -1,5 +1,33 @@
 const BASE_COMMANDS = [
   {
+    name: "set",
+    description: "Create or edit a saved post",
+    options: [
+      {
+        name: "command",
+        description: "Command name to create or edit",
+        type: 3,
+        required: true
+      }
+    ]
+  },
+  {
+    name: "posts",
+    description: "List saved post commands"
+  },
+  {
+    name: "deletepost",
+    description: "Delete a saved post",
+    options: [
+      {
+        name: "command",
+        description: "Command name to delete",
+        type: 3,
+        required: true
+      }
+    ]
+  },
+  {
     name: "sneakybot",
     description: "SneakyBot utilities and help",
     options: [
@@ -39,6 +67,9 @@ const BASE_COMMANDS = [
   }
 ];
 
+const RESERVED_COMMANDS = new Set(BASE_COMMANDS.map((command) => command.name));
+
 module.exports = {
-  BASE_COMMANDS
+  BASE_COMMANDS,
+  RESERVED_COMMANDS
 };

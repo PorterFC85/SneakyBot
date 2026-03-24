@@ -14,6 +14,10 @@ Contact: [Your Email or Discord Contact]
 
 SneakyBot allows users in a Discord server to:
 
+- create or edit saved posts using `/set`
+- retrieve saved posts using `!command`
+- list saved posts using `/posts`
+- delete saved posts using `/deletepost`
 - submit nominees using `/nominate`
 - start or end cut polls using `/cut`
 - repost the most recent cut poll result using `/cuts`

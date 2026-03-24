@@ -11,6 +11,11 @@ const {
   TextInputStyle
 } = require("discord.js");
 const {
+  isValidCommandName,
+  upsertCommand,
+  getCommand,
+  deleteCommand,
+  listCommands,
   upsertCutNomination,
   getQueuedCutNominations,
   clearQueuedCutNominations,
@@ -24,12 +29,19 @@ const {
   getLastCutPollResult,
   normalizePersonName
 } = require("./store");
-const { BASE_COMMANDS } = require("./command-definitions");
+const { BASE_COMMANDS, RESERVED_COMMANDS } = require("./command-definitions");
 
 const CUT_POLL_DURATION_MS = 5 * 60 * 1000;
 const CUT_VOTE_CUSTOM_ID_PREFIX = "cutvote:";
 const NOMINATION_EXPIRY_MS = 2 * 60 * 60 * 1000;
+const SET_POST_MODAL_PREFIX = "setpost:";
+const POST_EDIT_PREFIX = "postedit:";
+const POST_EDIT_CANCEL_PREFIX = "posteditcancel:";
+const POST_CONFIRM_PREFIX = "postconfirm:";
+const POST_DENY_PREFIX = "postdeny:";
+const POST_CONFIRM_TIMEOUT_MS = 3 * 60 * 1000;
 const nominationPurgeTimers = new Map();
+const pendingPostActions = new Map();
 
 const cutPollChannelIds = (process.env.CUT_POLL_CHANNEL_ID || "")
   .split(",")
@@ -69,7 +81,7 @@ if (configuredGuildIds.length === 0) {
 }
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
 function hasManageGuildPermission(interaction) {
@@ -124,6 +136,44 @@ function canUseBot(interaction) {
   return hasAllowedRole(interaction);
 }
 
+function canUseBotMessage(message) {
+  if (!message.guild) {
+    return false;
+  }
+
+  if (isBotBanned(message.author.id)) {
+    return false;
+  }
+
+  if (isBotAdmin(message.author.id)) {
+    return true;
+  }
+
+  if (!accessControlEnabled) {
+    return true;
+  }
+
+  const hasManageGuild = Boolean(
+    message.member
+      && message.member.permissions
+      && message.member.permissions.has(PermissionsBitField.Flags.ManageGuild)
+  );
+
+  if (hasManageGuild) {
+    return true;
+  }
+
+  if (allowedUserIds.includes(message.author.id)) {
+    return true;
+  }
+
+  return hasAllowedRole({ member: message.member });
+}
+
+function canManagePosts(interaction) {
+  return hasManageGuildPermission(interaction) || isBotAdmin(interaction.user.id);
+}
+
 function scheduleNominationPurge(guildId, delayMs) {
   const existing = nominationPurgeTimers.get(guildId);
   if (existing) clearTimeout(existing);
@@ -160,6 +210,183 @@ function getCutPollChannelWarning() {
 
   const mentions = cutPollChannelIds.map((id) => `<#${id}>`).join(" or ");
   return `Cut poll commands can only be used in ${mentions}.`;
+}
+
+function buildPendingPostKey(userId, commandName) {
+  return `${userId}:${commandName.toLowerCase()}`;
+}
+
+function buildPostModal(commandName, initialValue = "") {
+  const modal = new ModalBuilder()
+    .setCustomId(`${SET_POST_MODAL_PREFIX}${commandName}`)
+    .setTitle(`Set post: ${commandName}`);
+
+  const contentInput = new TextInputBuilder()
+    .setCustomId("content")
+    .setLabel("Post content")
+    .setStyle(TextInputStyle.Paragraph)
+    .setPlaceholder("Paste the text you want !command to post.")
+    .setRequired(true)
+    .setMaxLength(1900)
+    .setValue(initialValue.slice(0, 1900));
+
+  modal.addComponents(new ActionRowBuilder().addComponents(contentInput));
+  return modal;
+}
+
+function buildPostEditChoiceRow(pendingKey) {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${POST_EDIT_PREFIX}${pendingKey}`)
+        .setLabel("Edit")
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(`${POST_EDIT_CANCEL_PREFIX}${pendingKey}`)
+        .setLabel("Cancel")
+        .setStyle(ButtonStyle.Secondary)
+    )
+  ];
+}
+
+function buildPostConfirmRow(pendingKey) {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${POST_CONFIRM_PREFIX}${pendingKey}`)
+        .setLabel("Confirm")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`${POST_DENY_PREFIX}${pendingKey}`)
+        .setLabel("Deny")
+        .setStyle(ButtonStyle.Danger)
+    )
+  ];
+}
+
+function buildSavedPostContent(commandName, content) {
+  return `Current saved post for !${commandName}:\n\n${content}`;
+}
+
+function buildPostPreviewContent(commandName, content, isEditing) {
+  const header = isEditing
+    ? `Preview replacement for !${commandName}:`
+    : `Preview for !${commandName}:`;
+
+  return `${header}\n\n${content}`;
+}
+
+function buildPostsListContent(commands) {
+  if (commands.length === 0) {
+    return "No saved posts yet.";
+  }
+
+  const lines = commands.map((command) => `- !${command}`);
+  let content = "Saved commands:\n";
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const nextLine = `${lines[index]}\n`;
+    if (content.length + nextLine.length > 1900) {
+      const remaining = lines.length - index;
+      content += `...and ${remaining} more.`;
+      break;
+    }
+
+    content += nextLine;
+  }
+
+  return content.trimEnd();
+}
+
+function clearPendingPostAction(pendingKey) {
+  const pending = pendingPostActions.get(pendingKey);
+  if (pending && pending.timeoutId) {
+    clearTimeout(pending.timeoutId);
+  }
+  pendingPostActions.delete(pendingKey);
+  return pending || null;
+}
+
+async function disablePendingPostButtons(pending) {
+  if (!pending || !pending.channelId || !pending.messageId) {
+    return;
+  }
+
+  try {
+    const channel = await client.channels.fetch(pending.channelId);
+    if (!channel || !channel.isTextBased()) {
+      return;
+    }
+
+    const message = await channel.messages.fetch(pending.messageId);
+    if (!message || !message.components || message.components.length === 0) {
+      return;
+    }
+
+    const disabledRows = message.components.map((row) => {
+      const nextRow = new ActionRowBuilder();
+      row.components.forEach((component) => {
+        nextRow.addComponents(ButtonBuilder.from(component).setDisabled(true));
+      });
+      return nextRow;
+    });
+
+    await message.edit({ components: disabledRows });
+  } catch {
+    // Ignore timeout cleanup failures if the message or channel is gone.
+  }
+}
+
+function setPendingPostAction(pendingKey, pending) {
+  const existing = clearPendingPostAction(pendingKey);
+  if (existing) {
+    void disablePendingPostButtons(existing);
+  }
+
+  const timeoutId = setTimeout(() => {
+    const current = clearPendingPostAction(pendingKey);
+    if (!current) {
+      return;
+    }
+
+    void disablePendingPostButtons(current);
+
+    client.users.fetch(current.userId)
+      .then((user) => user.send(`The pending save for !${current.commandName} expired after 3 minutes.`))
+      .catch(() => undefined);
+  }, POST_CONFIRM_TIMEOUT_MS);
+
+  pendingPostActions.set(pendingKey, {
+    ...pending,
+    timeoutId,
+    createdAt: Date.now()
+  });
+
+  return pendingPostActions.get(pendingKey);
+}
+
+async function sendPendingPostEditPrompt(user, commandName, content, pendingKey) {
+  await user.send({
+    content: buildSavedPostContent(commandName, content)
+  });
+
+  return user.send({
+    content: `!${commandName} already exists. Would you like to edit it?`,
+    components: buildPostEditChoiceRow(pendingKey)
+  });
+}
+
+async function sendPendingPostPreview(user, commandName, content, existingContent, pendingKey) {
+  if (existingContent) {
+    await user.send({
+      content: buildSavedPostContent(commandName, existingContent)
+    });
+  }
+
+  return user.send({
+    content: buildPostPreviewContent(commandName, content, Boolean(existingContent)),
+    components: buildPostConfirmRow(pendingKey)
+  });
 }
 
 async function syncGuildCommands(guild) {
@@ -464,6 +691,63 @@ client.once("ready", async () => {
 });
 
 client.on("interactionCreate", async (interaction) => {
+  if (
+    interaction.isButton() &&
+    (
+      interaction.customId.startsWith(POST_EDIT_PREFIX)
+      || interaction.customId.startsWith(POST_EDIT_CANCEL_PREFIX)
+      || interaction.customId.startsWith(POST_CONFIRM_PREFIX)
+      || interaction.customId.startsWith(POST_DENY_PREFIX)
+    )
+  ) {
+    if (isBotBanned(interaction.user.id)) {
+      await interaction.reply({ content: "You are not allowed to use this bot.", ephemeral: true });
+      return;
+    }
+
+    const prefix = [POST_EDIT_CANCEL_PREFIX, POST_EDIT_PREFIX, POST_CONFIRM_PREFIX, POST_DENY_PREFIX]
+      .find((value) => interaction.customId.startsWith(value));
+    const pendingKey = interaction.customId.slice(prefix.length);
+    const pending = pendingPostActions.get(pendingKey);
+
+    if (!pending || pending.userId !== interaction.user.id) {
+      await interaction.reply({ content: "This post action is no longer active.", ephemeral: true });
+      return;
+    }
+
+    if (interaction.customId.startsWith(POST_EDIT_CANCEL_PREFIX)) {
+      clearPendingPostAction(pendingKey);
+      await interaction.update({
+        content: `Cancelled editing !${pending.commandName}.`,
+        components: []
+      });
+      return;
+    }
+
+    if (interaction.customId.startsWith(POST_EDIT_PREFIX)) {
+      clearPendingPostAction(pendingKey);
+      await interaction.showModal(buildPostModal(pending.commandName, pending.existingContent || ""));
+      return;
+    }
+
+    if (interaction.customId.startsWith(POST_DENY_PREFIX)) {
+      clearPendingPostAction(pendingKey);
+      await interaction.update({
+        content: `Cancelled saving !${pending.commandName}.`,
+        components: []
+      });
+      return;
+    }
+
+    const savedKey = upsertCommand(pending.commandName, pending.content, interaction.user.id);
+    clearPendingPostAction(pendingKey);
+    await interaction.update({
+      content: `Saved !${savedKey}. Use !${savedKey} to post it.`,
+      components: []
+    });
+    return;
+  }
+
   if (interaction.isButton() && interaction.customId.startsWith(CUT_VOTE_CUSTOM_ID_PREFIX)) {
     if (!canUseBot(interaction)) {
       await interaction.reply({
@@ -599,6 +883,82 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
 
+  if (interaction.isModalSubmit() && interaction.customId.startsWith(SET_POST_MODAL_PREFIX)) {
+    if (isBotBanned(interaction.user.id)) {
+      await interaction.reply({ content: "You are not allowed to use this bot.", ephemeral: true });
+      return;
+    }
+
+    if (interaction.inGuild() && !canUseBot(interaction)) {
+      await interaction.reply({ content: "You are not allowed to use this bot.", ephemeral: true });
+      return;
+    }
+
+    const commandName = interaction.customId.slice(SET_POST_MODAL_PREFIX.length).trim().toLowerCase();
+    const content = interaction.fields.getTextInputValue("content").trim();
+
+    if (!isValidCommandName(commandName)) {
+      await interaction.reply({
+        content: "Invalid command name. Use 2-32 chars: letters, numbers, underscore, or hyphen.",
+        ephemeral: interaction.inGuild()
+      });
+      return;
+    }
+
+    if (RESERVED_COMMANDS.has(commandName)) {
+      await interaction.reply({
+        content: "That command name is reserved. Choose a different name.",
+        ephemeral: interaction.inGuild()
+      });
+      return;
+    }
+
+    if (!content) {
+      await interaction.reply({
+        content: "Post content cannot be empty.",
+        ephemeral: interaction.inGuild()
+      });
+      return;
+    }
+
+    const pendingKey = buildPendingPostKey(interaction.user.id, commandName);
+    const existing = getCommand(commandName);
+
+    try {
+      const previewMessage = await sendPendingPostPreview(
+        interaction.user,
+        commandName,
+        content,
+        existing ? existing.content : "",
+        pendingKey
+      );
+
+      setPendingPostAction(pendingKey, {
+        userId: interaction.user.id,
+        commandName,
+        content,
+        existingContent: existing ? existing.content : "",
+        channelId: previewMessage.channelId,
+        messageId: previewMessage.id,
+        mode: "awaiting-save-confirm"
+      });
+
+      await interaction.reply({
+        content: interaction.inGuild()
+          ? "Check your DMs for the preview. Confirm or deny within 3 minutes."
+          : "Review the preview above and confirm or deny within 3 minutes.",
+        ephemeral: interaction.inGuild()
+      });
+    } catch {
+      clearPendingPostAction(pendingKey);
+      await interaction.reply({
+        content: "I could not DM you. Enable DMs from server members, then try /set again.",
+        ephemeral: interaction.inGuild()
+      });
+    }
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) {
     return;
   }
@@ -612,6 +972,92 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   const commandName = interaction.commandName;
+
+  if (commandName === "set") {
+    const keyInput = interaction.options.getString("command", true).trim().toLowerCase();
+
+    if (!isValidCommandName(keyInput)) {
+      await interaction.reply({
+        content: "Invalid command name. Use 2-32 chars: letters, numbers, underscore, or hyphen.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (RESERVED_COMMANDS.has(keyInput)) {
+      await interaction.reply({
+        content: "That command name is reserved. Choose a different name.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    const pendingKey = buildPendingPostKey(interaction.user.id, keyInput);
+    const existing = getCommand(keyInput);
+
+    if (!existing) {
+      clearPendingPostAction(pendingKey);
+      await interaction.showModal(buildPostModal(keyInput));
+      return;
+    }
+
+    try {
+      const promptMessage = await sendPendingPostEditPrompt(
+        interaction.user,
+        keyInput,
+        existing.content,
+        pendingKey
+      );
+
+      setPendingPostAction(pendingKey, {
+        userId: interaction.user.id,
+        commandName: keyInput,
+        existingContent: existing.content,
+        channelId: promptMessage.channelId,
+        messageId: promptMessage.id,
+        mode: "awaiting-edit-choice"
+      });
+
+      await interaction.reply({
+        content: `!${keyInput} already exists. Check your DMs to review it and choose whether to edit it.`,
+        ephemeral: true
+      });
+    } catch {
+      clearPendingPostAction(pendingKey);
+      await interaction.reply({
+        content: "I could not DM you. Enable DMs from server members, then try /set again.",
+        ephemeral: true
+      });
+    }
+    return;
+  }
+
+  if (commandName === "posts") {
+    await interaction.reply({
+      content: buildPostsListContent(listCommands()),
+      ephemeral: true
+    });
+    return;
+  }
+
+  if (commandName === "deletepost") {
+    if (!canManagePosts(interaction)) {
+      await interaction.reply({
+        content: "You need Manage Server permission or BOT_ADMIN_USER_IDS access to delete posts.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    const keyInput = interaction.options.getString("command", true).trim().toLowerCase();
+    const deleted = deleteCommand(keyInput);
+
+    await interaction.reply({
+      content: deleted ? `Deleted !${keyInput}.` : "No saved post found for that command name.",
+      ephemeral: true
+    });
+    return;
+  }
 
   if (commandName === "nominate") {
     if (!isCutPollChannel(interaction.channelId)) {
@@ -778,6 +1224,10 @@ client.on("interactionCreate", async (interaction) => {
     await interaction.reply({
       content: [
         "SneakyBot Commands:",
+        "- /set command:<name> -> create or edit a saved post with DM confirmation",
+        "- /posts -> list saved !commands",
+        "- /deletepost command:<name> -> delete a saved post (admin only)",
+        "- !<name> -> post the saved content for that command",
         "- /nominate -> open modal to nominate one or more people (one name per line)",
         "- /cut vote -> start a 5 minute button poll using queued nominations",
         "- /cut end -> end the active cut poll and post results",
@@ -787,6 +1237,35 @@ client.on("interactionCreate", async (interaction) => {
     });
     return;
   }
+});
+
+client.on("messageCreate", async (message) => {
+  if (!message.guild || message.author.bot) {
+    return;
+  }
+
+  if (!canUseBotMessage(message)) {
+    return;
+  }
+
+  const raw = message.content.trim();
+  if (!raw.startsWith("!")) {
+    return;
+  }
+
+  const commandName = raw.slice(1).trim().toLowerCase();
+  if (!commandName || commandName.includes(" ")) {
+    return;
+  }
+
+  const savedPost = getCommand(commandName);
+  if (!savedPost) {
+    return;
+  }
+
+  await message.channel.send({
+    content: savedPost.content
+  });
 });
 
 client.login(token);
